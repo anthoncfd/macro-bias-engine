@@ -1,20 +1,18 @@
 """
 MACRO BIAS ENGINE - Market Data Fetcher
-Fetches 12 assets (Forex, Commodities, Indices, Crypto) from Yahoo Finance.
-Fixed to handle Yahoo JSON tracking and session injection.
+Uses direct Yahoo API endpoint queries to prevent GitHub Actions data center blocks.
 """
-import yfinance as yf
 import requests
 import time
 import random
 
-# Asset configuration: "Display_Name": ["Primary_Ticker", "Fallback_Ticker"]
+# Asset configuration
 ASSETS = {
-    "XAUUSD": ["GC=F", "XAUUSD=X"],  # Gold
-    "XAGUSD": ["SI=F", "XAGUSD=X"],  # Silver
-    "BTCUSD": ["BTC-USD"],           # Bitcoin
-    "JP225": ["^N225"],              # Nikkei 225
-    "US30": ["^DJI"],                # Dow Jones
+    "XAUUSD": ["GC=F", "XAUUSD=X"],  
+    "XAGUSD": ["SI=F", "XAGUSD=X"],  
+    "BTCUSD": ["BTC-USD"],           
+    "JP225": ["^N225"],              
+    "US30": ["^DJI"],                
     "EURUSD": ["EURUSD=X"],
     "GBPUSD": ["GBPUSD=X"],
     "AUDUSD": ["AUDUSD=X"],
@@ -26,38 +24,48 @@ ASSETS = {
 
 FOREX_PAIRS = ["EURUSD", "GBPUSD", "AUDUSD", "EURJPY", "GBPJPY", "CADJPY", "CADCHF"]
 
-# Spoof a real browser header configuration
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1"
-}
-
 def safe_fetch(ticker, retries=3):
     """
-    Safely fetches the latest closing price with custom sessions
-    to bypass Yahoo Finance request screening.
+    Queries Yahoo's public API directly via HTTP. 
+    Bypasses standard scraper mechanics to prevent data center blocks.
     """
-    # Create an authenticated web session explicitly for yfinance
-    session = requests.Session()
-    session.headers.update(HEADERS)
+    # Direct API endpoint used by Yahoo's web charts
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json"
+    }
+    
+    # Request a short 5-day window to look back over weekends
+    params = {
+        "range": "5d",
+        "interval": "1d"
+    }
 
     for attempt in range(retries):
         try:
-            # Pass our browser session into the Ticker object
-            ticker_obj = yf.Ticker(ticker, session=session)
+            response = requests.get(url, headers=headers, params=params, timeout=10)
             
-            # Request historical window data safely
-            hist = ticker_obj.history(period="5d", auto_adjust=True)
+            if response.status_code == 200:
+                data = response.json()
+                # Drill straight into Yahoo's JSON structure for the last close price
+                chart_data = data.get("chart", {}).get("result", [None])[0]
+                if chart_data:
+                    indicators = chart_data.get("indicators", {}).get("quote", [{}])[0]
+                    closes = indicators.get("close", [])
+                    
+                    # Filter out any null/None entries from the closing array
+                    valid_closes = [c for c in closes if c is not None]
+                    if valid_closes:
+                        return float(valid_closes[-1])
             
-            if not hist.empty:
-                return float(hist["Close"].iloc[-1])
-                
+            print(f"   ⚠️ Request retry {attempt+1}/{retries} status code for {ticker}: {response.status_code}")
+            
         except Exception as e:
             print(f"   ⚠️ Attempt {attempt+1}/{retries} failed for {ticker}: {str(e)[:45]}")
-            time.sleep(random.uniform(1.5, 3.0))
+            
+        time.sleep(random.uniform(1.0, 2.5))
             
     return None
 
@@ -71,10 +79,9 @@ def fetch_all_prices():
             price = safe_fetch(t)
             if price is not None:
                 break
-            time.sleep(0.5)
+            time.path = time.sleep(0.5)
         
         prices[name] = price
-        # Gentle pacing between asset blocks
         time.sleep(random.uniform(0.5, 1.2))
         
     return prices
