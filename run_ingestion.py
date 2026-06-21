@@ -4,6 +4,8 @@ Orchestrates fetching data and inserting it into Supabase.
 """
 import sys
 import os
+import time
+import random
 
 # Add the src folder to the Python path so we can import our modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -19,11 +21,15 @@ def run_pipeline():
     print(f"📅 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 55)
 
-    # 1. Fetch prices
+    # 1. Wait a bit to avoid Yahoo blocking
+    print("\n⏳ Waiting 5 seconds to avoid rate limiting...")
+    time.sleep(5)
+
+    # 2. Fetch prices
     print("\n📊 Fetching live market data...")
     prices = fetch_all_prices()
 
-    # 2. Display prices
+    # 3. Display prices
     for name, price in prices.items():
         if price is None:
             print(f"   ❌ {name:10} : No data")
@@ -32,7 +38,7 @@ def run_pipeline():
         else:
             print(f"   ✅ {name:10} : ${price:,.2f}")
 
-    # 3. Connect to Supabase
+    # 4. Connect to Supabase
     print("\n🔌 Connecting to Supabase...")
     try:
         supabase = get_supabase_client()
@@ -41,7 +47,7 @@ def run_pipeline():
         print(f"   ❌ Connection failed: {e}")
         return
 
-    # 4. Insert data
+    # 5. Insert data
     print("\n📤 Inserting data into 'market_structure_logs'...")
     inserted_count = 0
     for ticker, price in prices.items():
@@ -52,8 +58,8 @@ def run_pipeline():
         row = {
             "ticker": ticker,
             "latest_close": price,
-            "trend": "NEUTRAL",      # Placeholder for future Bias Engine
-            "momentum_score": 0.0    # Placeholder for future Bias Engine
+            "trend": "NEUTRAL",
+            "momentum_score": 0.0
         }
 
         try:
