@@ -9,15 +9,10 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-# Standard dynamic path assignment: resolves the absolute module directory safely
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-src_root = os.path.abspath(os.path.join(CURRENT_DIR, "..", ".."))
-if src_root not in sys.path:
-    sys.path.append(src_root)
-# Also map the explicit project parent directory 
-repo_root = os.path.abspath(os.path.join(src_root, ".."))
-if repo_root not in sys.path:
-    sys.path.append(repo_root)
+# Add parent directory to path dynamically
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
 
 from src.database.supabase_client import get_supabase_client
 from src.ingestion.market_prices import ASSETS, FOREX_PAIRS
@@ -25,7 +20,7 @@ from src.ingestion.market_prices import ASSETS, FOREX_PAIRS
 # --- Configuration ---
 HISTORY_DAYS = 60      # Rolling historical sample window
 SMA_WINDOW = 20        # Core baseline moving average structure
-MIN_DATA_POINTS = 10   # Threshold floor to eliminate fresh-start outliers (Set to 1 for temporary testing)
+MIN_DATA_POINTS = 10   # Threshold floor to eliminate fresh-start outliers
 
 def fetch_asset_history(display_name, tickers):
     """
@@ -37,7 +32,8 @@ def fetch_asset_history(display_name, tickers):
     try:
         supabase = get_supabase_client()
         
-        # Query using the raw tickers array (.in_) instead of the display name
+        # CRITICAL FIX: Query using the raw tickers array (.in_)
+        # NOT the display name! The database stores "GC=F", not "XAUUSD"
         response = supabase.table("market_structure_logs") \
             .select("latest_close", "created_at", "ticker") \
             .in_("ticker", tickers) \
@@ -55,6 +51,7 @@ def fetch_asset_history(display_name, tickers):
         df['created_at'] = pd.to_datetime(df['created_at'])
         df = df.sort_values('created_at').reset_index(drop=True)
         
+        print(f"   ✅ Found {len(df)} rows for {display_name}")
         return df
         
     except Exception as e:
@@ -131,6 +128,7 @@ def run_bias_engine():
     results = {}
     
     for display_name, tickers in ASSETS.items():
+        # Pass both the display name label and raw symbols list
         result = calculate_bias_for_asset(display_name, tickers)
         results[display_name] = result
         
