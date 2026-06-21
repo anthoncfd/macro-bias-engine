@@ -1,72 +1,69 @@
+"""
+MACRO BIAS ENGINE - Main Ingestion Pipeline
+Orchestrates fetching data and inserting it into Supabase.
+"""
 import sys
 import os
 
-# 1. System Path Alignment: Tell Python where to find our custom subfolders
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add the src folder to the Python path so we can import our modules
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from src.database.supabase_client import get_supabase_client
-from src.ingestion.market_prices import fetch_asset_data, calculate_market_structure
+from src.ingestion.market_prices import fetch_all_prices, FOREX_PAIRS
+from datetime import datetime
 
+def run_pipeline():
+    """Executes the full ingestion pipeline."""
+    print("=" * 55)
+    print("🚀 MACRO BIAS ENGINE - INGESTION PIPELINE")
+    print(f"📅 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 55)
 
-def execute_pipeline():
-    """
-    Orchestrates downloading market data, calculating structure metrics,
-    and writing the results to the Supabase cloud ledger.
-    """
-    print("🚀 Initializing Macro Bias Ingestion Engine Pipeline...")
+    # 1. Fetch prices
+    print("\n📊 Fetching live market data...")
+    prices = fetch_all_prices()
 
-    # 2. Establish cloud database connection
+    # 2. Display prices
+    for name, price in prices.items():
+        if price is None:
+            print(f"   ❌ {name:10} : No data")
+        elif name in FOREX_PAIRS:
+            print(f"   ✅ {name:10} : {price:.4f}")
+        else:
+            print(f"   ✅ {name:10} : ${price:,.2f}")
+
+    # 3. Connect to Supabase
+    print("\n🔌 Connecting to Supabase...")
     try:
         supabase = get_supabase_client()
-        print("✅ Secure cloud database connection established successfully.")
-    except Exception as connection_error:
-        print(f"❌ Pipeline aborted. Connection failure: {connection_error}")
+        print("   ✅ Connection successful!")
+    except Exception as e:
+        print(f"   ❌ Connection failed: {e}")
         return
 
-    # 3. Map friendly asset names to yfinance symbols
-    assets_to_track = {
-        "XAUUSD": "GC=F",          # Gold futures
-        "BTCUSD": "BTC-USD",       # Bitcoin
-        "DXY":    "DX-Y.NYB",      # US Dollar Index
-        "EURUSD": "EURUSD=X",      # Euro / US Dollar
-        "GBPUSD": "GBPUSD=X",      # British Pound / US Dollar
-        "GBPJPY": "GBPJPY=X",      # British Pound / Japanese Yen
-        "EURJPY": "EURJPY=X",      # Euro / Japanese Yen
-    }
-
-    # 4. Process each asset sequentially
-    for friendly_name, ticker_symbol in assets_to_track.items():
-        print(f"\n🔄 Processing asset: {friendly_name} ({ticker_symbol})")
-
-        # --- Step A: fetch raw price data ---
-        raw_data = fetch_asset_data(ticker_symbol, lookback_days=30)
-
-        # --- Step B: skip assets with no usable data ---
-        if raw_data.empty or len(raw_data) < 2:
-            print(f"⚠️ Skipping {friendly_name} – not enough data (got {len(raw_data)} rows).")
+    # 4. Insert data
+    print("\n📤 Inserting data into 'market_structure_logs'...")
+    inserted_count = 0
+    for ticker, price in prices.items():
+        if price is None:
+            print(f"   ⚠️ Skipping {ticker} (no data)")
             continue
 
-        # --- Step C: calculate market structure ---
-        metrics = calculate_market_structure(raw_data)
-
-        # --- Step D: build the database payload ---
-        data_packet = {
-            "ticker":         friendly_name,
-            "latest_close":   metrics["latest_close"],
-            "trend":          metrics["trend"],
-            "momentum_score": metrics["momentum_score"],
+        row = {
+            "ticker": ticker,
+            "latest_close": price,
+            "trend": "NEUTRAL",      # Placeholder for future Bias Engine
+            "momentum_score": 0.0    # Placeholder for future Bias Engine
         }
 
-        # --- Step E: push to Supabase ---
         try:
-            print(f"📤 Pushing {friendly_name} structure metrics to the cloud...")
-            response = supabase.table("market_structure_logs").insert(data_packet).execute()
-            print(f"🎉 Success! Recorded row for {friendly_name} (Trend: {metrics['trend']})")
-        except Exception as upload_error:
-            print(f"❌ Failed to upload data packet for {friendly_name}. Details: {upload_error}")
+            supabase.table("market_structure_logs").insert(row).execute()
+            print(f"   ✅ Inserted {ticker}")
+            inserted_count += 1
+        except Exception as e:
+            print(f"   ❌ Failed {ticker}: {e}")
 
-    print("\n🏁 Pipeline complete. All market regimes logged successfully.")
-
+    print(f"\n🎉 Pipeline complete! Inserted {inserted_count} of {len(prices)} assets.")
 
 if __name__ == "__main__":
-    execute_pipeline()
+    run_pipeline()
