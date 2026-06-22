@@ -1,22 +1,23 @@
 """
-MACRO BIAS ENGINE - Ingestion Pipeline Orchestrator
-Triggers data ingestion, updates underlying historical tables, 
-and runs analytics to sync the dynamic Telegram fast-read summaries.
+MACRO BIAS ENGINE - Main Ingestion Pipeline
+Orchestrates fetching data, inserting it into Supabase,
+running the quantitative Bias Engine, and updating the summary cache.
 """
 import sys
 import os
 import time
 from datetime import datetime
 
-# Map explicit path requirements cleanly across environment execution runtimes
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-if BASE_DIR not in sys.path:
-    sys.path.append(BASE_DIR)
-    sys.path.append(os.path.join(BASE_DIR, "src"))
+# Force explicit root system workspace append tracking before executing module lookups
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURRENT_DIR not in sys.path:
+    sys.path.append(CURRENT_DIR)
 
 from src.database.supabase_client import get_supabase_client
 from src.ingestion.market_prices import fetch_all_prices, FOREX_PAIRS
-from src.engine.bias_engine import update_bias_summary
+
+# FIX: Target the analytics structural package path instead of engine folder
+from src.analytics.bias_engine import update_bias_summary
 
 def run_pipeline():
     """Executes the quantitative automated processing flow sequential steps."""
@@ -67,7 +68,7 @@ def run_pipeline():
     print("=" * 60)
     
     try:
-        # Executes mathematical tracking logic and populates fast summaries seamlessly
+        # Calls the updated analytics engine calculation matrix seamlessly
         update_bias_summary()
     except Exception as e:
         print(f"❌ Critical error computed during engine aggregation processing: {e}")
