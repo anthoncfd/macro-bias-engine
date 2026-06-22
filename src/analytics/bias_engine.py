@@ -102,6 +102,34 @@ def get_today_macro_vectors():
 
 # --- Main Analytical Processing Block ---
 
+def fetch_asset_history(display_name, tickers):
+    """Fetch historical data cleanly using flexible timestamp formats to avoid string exceptions."""
+    print(f"   📥 Fetching historical matrix for {display_name}...")
+    try:
+        supabase = get_supabase_client()
+        response = supabase.table("market_structure_logs") \
+            .select("latest_close", "created_at") \
+            .eq("ticker", display_name) \
+            .order("created_at", desc=True) \
+            .limit(HISTORY_DAYS) \
+            .execute()
+            
+        if not response.data:
+            print(f"   ⚠️ No data found for {display_name}")
+            return pd.DataFrame()
+            
+        df = pd.DataFrame(response.data)
+        
+        # Explicitly configured format='mixed' to let pandas interpret dynamic ISO8601 variations without crashing
+        df['created_at'] = pd.to_datetime(df['created_at'], format='mixed', utc=True)
+        df = df.sort_values('created_at').reset_index(drop=True)
+        
+        print(f"   ✅ Found {len(df)} rows for {display_name}")
+        return df
+    except Exception as e:
+        print(f"   ❌ Database query crash parsing datetimes: {e}")
+        return pd.DataFrame()
+
 def calculate_bias_for_asset(display_name, tickers, macro_vectors):
     df = fetch_asset_history(display_name, tickers)
     if len(df) < MIN_DATA_POINTS:
@@ -180,27 +208,6 @@ def calculate_bias_for_asset(display_name, tickers, macro_vectors):
         "last_update": df['created_at'].iloc[-1].strftime('%Y-%m-%d %H:%M:%S')
     }
 
-def fetch_asset_history(display_name, tickers):
-    try:
-        supabase = get_supabase_client()
-        response = supabase.table("market_structure_logs") \
-            .select("latest_close", "created_at") \
-            .eq("ticker", display_name) \
-            .order("created_at", desc=True) \
-            .limit(HISTORY_DAYS) \
-            .execute()
-            
-        if not response.data:
-            return pd.DataFrame()
-            
-        df = pd.DataFrame(response.data)
-        df['created_at'] = pd.to_datetime(df['created_at'], format='ISO8601', utc=True)
-        df = df.sort_values('created_at').reset_index(drop=True)
-        return df
-    except Exception as e:
-        print(f"   ❌ Database query crash: {e}")
-        return pd.DataFrame()
-
 def run_bias_engine():
     """Orchestrates computational updates across all tracked portfolio models."""
     print("=" * 65)
@@ -229,7 +236,7 @@ def run_bias_engine():
     return results
 
 def update_bias_summary():
-    """Updates the macro_bias_summary fast cache table with the hybrid results."""
+    """Updates the macro_bias_summary cache table with the hybrid results."""
     print("\n📤 Syncing calculations directly to database summary blocks...")
     results = run_bias_engine()
     supabase = get_supabase_client()
@@ -247,7 +254,7 @@ def update_bias_summary():
             "confidence": float(data["confidence"]),
             "z_score": float(data["z_score"]),
             "momentum_pct": float(data["momentum_pct"]),
-            "updated_at": datetime.utcnow().isoformat() + "Z"  # Standardized high-fidelity timestamp
+            "updated_at": datetime.utcnow().isoformat() + "Z"
         }
         
         try:
