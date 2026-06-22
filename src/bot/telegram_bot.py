@@ -171,17 +171,17 @@ def calculate_hybrid_confluence(ticker, technical_bias, macro_vectors):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Welcome menu detailing the institutional framework architecture."""
     welcome = (
-        "🏛️ *MACRO BIAS ENGINE — HYBRID V1* 🤖\n"
-        "━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━\n"
-        "*Confluence Model: Pure Quant + Fundamental Deviation*\n\n"
-        "📌 *Available Commands:*\n"
-        "• `/daily\-bias` \- Institutional Hybrid Matrix\n"
-        "• `/eurusd` \| `/gbpusd` \| `/audusd` \- FX Majors\n"
-        "• `/gold` \| `/silver` \- Precious Metals\n"
-        "• `/btc` \- Crypto Systems\n"
-        "• `/nikkei` \| `/dow` \- Equity Indices\n"
-        "• `/help` \- Show this system specification manual\n\n"
-        "📈 _1% better everyday. 37X better._"
+        r"🏛️ *MACRO BIAS ENGINE — HYBRID V1* 🤖" "\n"
+        r"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━" "\n"
+        r"*Confluence Model: Pure Quant + Fundamental Deviation*" "\n\n"
+        r"📌 *Available Commands:*" "\n"
+        r"• `/daily\-bias` \- Institutional Hybrid Matrix" "\n"
+        r"• `/eurusd` \| `/gbpusd` \| `/audusd` \- FX Majors" "\n"
+        r"• `/gold` \| `/silver` \- Precious Metals" "\n"
+        r"• `/btc` \- Crypto Systems" "\n"
+        r"• `/nikkei` \| `/dow` \- Equity Indices" "\n"
+        r"• `/help` \- Show this system specification manual" "\n\n"
+        r"📈 _1% better everyday. 37X better._"
     )
     await update.message.reply_text(welcome, parse_mode="MarkdownV2")
 
