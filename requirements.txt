@@ -3,3 +3,5 @@ numpy==1.26.4
 supabase==2.5.1
 python-dotenv==1.0.1
 yfinance==0.2.40
+python-telegram-bot==20.8
+requests==2.32.3
