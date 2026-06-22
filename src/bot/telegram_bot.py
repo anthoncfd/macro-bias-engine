@@ -65,7 +65,7 @@ def analyze_macro_deviation(event_name, actual_raw, forecast_raw):
         
     name = event_name.upper()
     
-    # Invert the logic for negative indicators like Unemployment Rate
+    # FIX: Explicitly terminate both positive and negative deviation flows for inverse metrics
     if "UNEMPLOYMENT" in name or "JOBLESS CLAIMS" in name:
         return "BEARISH" if deviation > 0 else "BULLISH"
         
@@ -132,7 +132,6 @@ def calculate_hybrid_confluence(ticker, technical_bias, macro_vectors):
     active_event = None
     
     # Identify which currency vector applies to the asset ticker
-    # For FX pairs (e.g., EURUSD), the base currency dictates the direction, counter currency modulates it.
     applicable_currency = None
     if ticker in ["XAUUSD", "XAGUSD", "BTCUSD", "US30"]:
         applicable_currency = "USD"
@@ -175,7 +174,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         r"━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━" "\n"
         r"*Confluence Model: Pure Quant + Fundamental Deviation*" "\n\n"
         r"📌 *Available Commands:*" "\n"
-        r"• `/daily\-bias` \- Institutional Hybrid Matrix" "\n"
+        r"• `/daily_bias` \- Institutional Hybrid Matrix" "\n"
         r"• `/eurusd` \| `/gbpusd` \| `/audusd` \- FX Majors" "\n"
         r"• `/gold` \| `/silver` \- Precious Metals" "\n"
         r"• `/btc` \- Crypto Systems" "\n"
@@ -202,7 +201,6 @@ async def daily_bias(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         macro_vectors = get_today_fundamental_vectors()
         
-        # Priority sort: Divergences and Strong setups up top, Neutral bands last
         def priority_rank(row):
             tech_bias = row.get("direction", "NEUTRAL")
             ticker = row.get("ticker")
@@ -227,7 +225,6 @@ async def daily_bias(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             hybrid_bias, summary_note = calculate_hybrid_confluence(ticker, tech_bias, macro_vectors)
             
-            # Map clean contextual display emojis
             if "STRONG BULLISH" in hybrid_bias: emoji = "💎🟢"
             elif "STRONG BEARISH" in hybrid_bias: emoji = "💎🔴"
             elif "DIVERGENCE" in hybrid_bias: emoji = "⚡"
@@ -236,9 +233,12 @@ async def daily_bias(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif "BEARISH" in hybrid_bias: emoji = "🔴"
             else: emoji = "⚪"
             
+            # FIX: Escape strings manually to prevent raw Markdown parse crashes when summary notes contain special formatting characters
+            clean_note = summary_note.replace("_", "\\_").replace("*", "\\*").replace("`", "\\`")
+            
             lines.append(f"{emoji} *{ticker}* | `{hybrid_bias}`")
             lines.append(f"     Metrics: Prob `{prob}%` | Conf `{conf}%`")
-            lines.append(f"     Context: _{summary_note}_\n")
+            lines.append(f"     Context: _{clean_note}_\n")
             
         lines.append("━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━ ━")
         lines.append("📊 _Confluence models align 20-period technical vectors with fundamental economic data deviations._")
@@ -281,6 +281,8 @@ async def asset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         macro_vectors = get_today_fundamental_vectors()
         hybrid_bias, summary_note = calculate_hybrid_confluence(ticker, data['direction'], macro_vectors)
         
+        clean_note = summary_note.replace("_", "\\_").replace("*", "\\*").replace("`", "\\`")
+        
         lines = [
             f"🏛️ *HYBRID ASSET PROFILE: {ticker}*",
             "━ ━ ━ ━ ━ ━ ━ ━ ━ ━",
@@ -290,7 +292,7 @@ async def asset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚡ Daily Momentum: `{data['momentum_pct']}%`",
             f"🔒 Model Confidence: `{data['confidence']}%`",
             "━ ━ ━ ━ ━ ━ ━ ━ ━ ━",
-            f"📝 Structural State: _{summary_note}_",
+            f"📝 Structural State: _{clean_note}_",
             f"🕐 Pipeline Sync: `{data['updated_at'][:16].replace('T', ' ')} UTC`"
         ]
         
@@ -310,7 +312,6 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("daily_bias", daily_bias))
-    app.add_handler(CommandHandler("daily-bias", daily_bias))
     
     for cmd in ["eurusd", "gbpusd", "audusd", "eurjpy", "gbpjpy", "cadjpy", "cadchf", "gold", "silver", "btc", "nikkei", "dow"]:
         app.add_handler(CommandHandler(cmd, asset_command))
