@@ -22,7 +22,7 @@ from src.ingestion.market_prices import ASSETS, FOREX_PAIRS
 # --- Configuration ---
 HISTORY_DAYS = 60
 SMA_WINDOW = 20
-MIN_DATA_POINTS = 10  # Set to 5 if traditional asset weekend gaps truncate data profiles
+MIN_DATA_POINTS = 10  
 
 def fetch_asset_history(display_name, tickers):
     """Fetch historical data using the display name (since that's what's stored)."""
@@ -41,7 +41,10 @@ def fetch_asset_history(display_name, tickers):
             return pd.DataFrame()
             
         df = pd.DataFrame(response.data)
-        df['created_at'] = pd.to_datetime(df['created_at'])
+        
+        # FIX: Using format='ISO8601' forces Pandas to parse the database 'T' and timezone offset cleanly
+        df['created_at'] = pd.to_datetime(df['created_at'], format='ISO8601')
+        
         df = df.sort_values('created_at').reset_index(drop=True)
         print(f"   ✅ Found {len(df)} rows for {display_name}")
         return df
@@ -126,7 +129,7 @@ def run_bias_engine():
             print(f"{display_name:8} | ❌ {result.get('message', 'No data')}")
             
     print("-" * 65)
-    print("✅ Bias Engine complete!")
+    print("Base Engine complete!")
     return results
 
 if __name__ == "__main__":
