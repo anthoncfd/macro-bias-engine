@@ -1,10 +1,11 @@
 """
 MACRO BIAS ENGINE - Market Data Ingestion Fetcher
-Safely extracts price streams for 12 core global macroeconomic assets from Yahoo Finance.
+Extracts price streams for 12 core global macroeconomic assets safely.
 """
 import yfinance as yf
+import requests
 
-# Institutional Asset Configuration Matrix: "Display_Name": ["Primary_Ticker", "Fallback_Ticker"]
+# Institutional Asset Configuration Matrix
 ASSETS = {
     "XAUUSD": ["GC=F", "XAUUSD=X"],  # Gold Spot
     "XAGUSD": ["SI=F", "XAGUSD=X"],  # Silver Spot
@@ -20,28 +21,36 @@ ASSETS = {
     "CADCHF": ["CADCHF=X"]
 }
 
-# Standard 4-decimal place truncation targets for Forex pairs
 FOREX_PAIRS = ["EURUSD", "GBPUSD", "AUDUSD", "EURJPY", "GBPJPY", "CADJPY", "CADCHF"]
 
 def safe_fetch(ticker):
     """
     Safely extracts the latest daily session close price.
-    Uses an isolated 5-day history window to protect against weekend data gaps.
+    Attaches custom header sessions to bypass GitHub Actions IP scraper limits.
     """
     try:
-        data = yf.Ticker(ticker)
-        hist = data.history(period="5d")
-        if not hist.empty:
-            return float(hist["Close"].iloc[-1])
+        # Create a session to mask serverless automated patterns
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
+        
+        # Pull 7 days to cover extended holiday/weekend indexing drops cleanly
+        data = yf.Ticker(ticker, session=session)
+        hist = data.history(period="7d")
+        
+        if not hist.empty and 'Close' in hist.columns:
+            # Drop any trailing NaN or un-settled real-time daily candles
+            clean_series = hist['Close'].dropna()
+            if not clean_series.empty:
+                return float(clean_series.iloc[-1])
         return None
-    except Exception:
+    except Exception as e:
+        print(f"   ⚠️ yfinance connection exception for {ticker}: {e}")
         return None
 
 def fetch_all_prices():
-    """
-    Iterates through structural assets using primary and fallback tickers.
-    Returns a unified real-time price dictionary.
-    """
+    """Iterates through tickers using primary and fallback channels."""
     prices = {}
     for name, tickers in ASSETS.items():
         price = None
@@ -50,4 +59,8 @@ def fetch_all_prices():
             if price is not None:
                 break
         prices[name] = price
+        if price is not None:
+            print(f"   💸 Feed connection successful: {name} -> {price}")
+        else:
+            print(f"   ❌ Feed connection dead for asset row: {name}")
     return prices
