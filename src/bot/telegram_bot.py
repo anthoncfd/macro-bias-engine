@@ -60,16 +60,14 @@ def analyze_macro_deviation(event_name, actual_raw, forecast_raw):
         return "NEUTRAL"
         
     deviation = actual - forecast
-    if abs(deviation) < 0.001:  # inline with expectations
+    if abs(deviation) < 0.001:
         return "NEUTRAL"
         
     name = event_name.upper()
     
-    # FIX: Explicitly terminate both positive and negative deviation flows for inverse metrics
     if "UNEMPLOYMENT" in name or "JOBLESS CLAIMS" in name:
         return "BEARISH" if deviation > 0 else "BULLISH"
         
-    # Default economic strength expansion logic (CPI, NFP, GDP, Rate hikes)
     return "BULLISH" if deviation > 0 else "BEARISH"
 
 def get_today_fundamental_vectors():
@@ -98,7 +96,6 @@ def get_today_fundamental_vectors():
             if not currency:
                 continue
                 
-            # Filter strictly for high-impact market drivers
             is_high_impact = impact == "HIGH" or any(kw in event_name.upper() for kw in HIGH_IMPACT_KEYWORDS)
             if not is_high_impact:
                 continue
@@ -106,9 +103,8 @@ def get_today_fundamental_vectors():
             actual = event.get("actual")
             forecast = event.get("forecast")
             
-            # If the data hasn't been released yet, flag it as pending risk
             if actual is None or str(actual).strip() == "":
-                if currency not in vectors:  # Don't overwrite an already released event
+                if currency not in vectors:
                     vectors[currency] = {"vector": "PENDING", "event": event_name}
                 continue
                 
@@ -131,7 +127,6 @@ def calculate_hybrid_confluence(ticker, technical_bias, macro_vectors):
     fund_dir = "NEUTRAL"
     active_event = None
     
-    # Identify which currency vector applies to the asset ticker
     applicable_currency = None
     if ticker in ["XAUUSD", "XAGUSD", "BTCUSD", "US30"]:
         applicable_currency = "USD"
@@ -145,12 +140,10 @@ def calculate_hybrid_confluence(ticker, technical_bias, macro_vectors):
         fund_dir = macro_vectors[applicable_currency]["vector"]
         active_event = macro_vectors[applicable_currency]["event"]
         
-        # If USD data is bearish, it makes USD-quoted assets (Gold, Crypto, Indices) technically Bullish
         if applicable_currency == "USD" and ticker in ["XAUUSD", "XAGUSD", "BTCUSD", "US30"]:
             if fund_dir == "BULLISH": fund_dir = "BEARISH"
             elif fund_dir == "BEARISH": fund_dir = "BULLISH"
 
-    # Confluence Matrix Resolution Engine
     if fund_dir == "PENDING":
         return "⚠️ PAUSE (PENDING NEWS)", f"Awaiting high-impact release: {active_event}"
         
@@ -233,7 +226,6 @@ async def daily_bias(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif "BEARISH" in hybrid_bias: emoji = "🔴"
             else: emoji = "⚪"
             
-            # FIX: Escape strings manually to prevent raw Markdown parse crashes when summary notes contain special formatting characters
             clean_note = summary_note.replace("_", "\\_").replace("*", "\\*").replace("`", "\\`")
             
             lines.append(f"{emoji} *{ticker}* | `{hybrid_bias}`")
