@@ -2,9 +2,9 @@ name: Macro Bias Engine - Daily Ingestion
 
 on:
   schedule:
-    # Runs at 22:10 UTC, Monday to Friday (NY Market Close + 10 min buffer)
+    # Triggers daily at 22:10 UTC (Monday to Friday) representing New York Close + 10m settlement
     - cron: '10 22 * * 1-5'
-  workflow_dispatch:  # Allows you to manually trigger it from the GitHub Actions tab
+  workflow_dispatch:  # Allows manual user executions directly from GitHub UI panel
 
 jobs:
   ingest-data:
@@ -26,6 +26,7 @@ jobs:
       - name: Run ingestion pipeline
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}  # Verify this is your high-privilege service_role token key
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
         run: |
           python run_ingestion.py
