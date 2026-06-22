@@ -5,6 +5,7 @@ Designed for GitHub Actions (short-lived runs).
 """
 import os
 import sys
+import asyncio
 import logging
 from datetime import datetime
 
@@ -44,11 +45,11 @@ app.add_handler(CommandHandler("daily_bias", daily_bias))
 for cmd in ["eurusd", "gbpusd", "audusd", "eurjpy", "gbpjpy", "cadjpy", "cadchf", "gold", "silver", "btc", "nikkei", "dow"]:
     app.add_handler(CommandHandler(cmd, asset_command))
 
-# --- Poll once and exit ---
-def poll_once():
+async def poll_once():
+    """Fetch pending updates once and process them."""
     print("⏳ Fetching pending updates...")
     # Get updates from Telegram (limit=100)
-    updates = app.bot.get_updates(limit=100, timeout=5)
+    updates = await app.bot.get_updates(limit=100, timeout=5)
     
     if not updates:
         print("ℹ️ No pending updates.")
@@ -57,9 +58,9 @@ def poll_once():
     print(f"📥 Processing {len(updates)} updates...")
     for update in updates:
         # Process each update
-        app.process_update(update)
+        await app.process_update(update)
     
     print("✅ Done.")
 
 if __name__ == "__main__":
-    poll_once()
+    asyncio.run(poll_once())
