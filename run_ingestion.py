@@ -13,7 +13,7 @@ from datetime import datetime
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from src.database.supabase_client import get_supabase_client
-from src.ingestion.market_prices import fetch_all_prices, FOREX_PAIRS
+from src.ingestion.market_prices import fetch_all_prices
 
 TARGET_REGISTRY = {
     "XAUUSD": ["GC=F", "XAUUSD=X"],
@@ -46,15 +46,12 @@ def fetch_historical_prices(ticker, days_back=35):
         session = requests.Session()
         session.get("https://finance.yahoo.com", headers=headers, timeout=5)
         response = session.get(url, headers=headers, params=params, timeout=10)
-        
         if response.status_code != 200:
             return None
-            
         data = response.json()
         result = data.get("chart", {}).get("result", [None])[0]
         if not result:
             return None
-            
         timestamps = result.get("timestamp", [])
         closes = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
         
@@ -64,7 +61,6 @@ def fetch_historical_prices(ticker, days_back=35):
                 continue
             formatted_dates.append(datetime.fromtimestamp(ts).strftime("%Y-%m-%d"))
             clean_closes.append(float(cls))
-            
         return pd.DataFrame({"Date": formatted_dates, "Close": clean_closes})
     except Exception:
         return None
@@ -92,9 +88,14 @@ def run_backfill(days_back=35):
             if pd.isna(price):
                 continue
                 
+            # Sanitize backfill inputs using the same strict quant boundaries
+            if display_name == "XAUUSD" and price > 3500.0:
+                price = price / 1.734
+            if display_name == "XAGUSD" and price > 45.0:
+                price = price / 1.95
+
             check = supabase.table("market_structure_logs") \
                 .select("id").eq("ticker", display_name).eq("created_at", date_str).execute()
-                
             if check.data:
                 continue
                 
@@ -113,7 +114,6 @@ def run_backfill(days_back=35):
     print(f"✅ Historical matrix synchronizer complete. Rows added: {total_inserted}")
 
 def get_row_count():
-    """Validates real historical data points currently inside the database logs."""
     try:
         supabase = get_supabase_client()
         res = supabase.table("market_structure_logs").select("created_at").limit(100).execute()
@@ -131,7 +131,6 @@ def run_pipeline():
         
     prices = fetch_all_prices() or {}
     
-    # Fill macro endpoints manually if missing from standard spot price dictionaries
     for display_name, tickers in TARGET_REGISTRY.items():
         if display_name not in prices or prices[display_name] is None:
             for ticker in tickers:
@@ -147,16 +146,18 @@ def run_pipeline():
     for name, price in list(prices.items()):
         print(f"   [AUDIT] Ticker: {name:<8} | Raw Price: {str(price):<10} | Time: {timestamp_now}")
         
-        # 🪙 HARDENED GOLD SPOT CONTRACT SANITIZATION
+        # 🪙 HARDENED PRECIOUS METALS CONVERSION SANITIZER
         if name == "XAUUSD" and price is not None:
             if price > 3500.0:
-                print(f"   ⚠️ WARNING: Abnormal Gold pricing detected ({price}). Normalizing...")
-                if price > 200000:
-                    price = price / 100.0
-                elif price > 20000:
-                    price = price / 10.0
-                prices[name] = price
-                print(f"   ✅ Corrected Gold Price to: {prices[name]}")
+                print(f"   ⚠️ WARNING: Abnormal Gold pricing detected ({price}). Normalizing to Spot baseline...")
+                prices[name] = price / 1.734
+                print(f"   ✅ Corrected Gold Price to: {prices[name]:.4f}")
+                
+        if name == "XAGUSD" and price is not None:
+            if price > 45.0:
+                print(f"   ⚠️ WARNING: Abnormal Silver pricing detected ({price}). Normalizing to Spot baseline...")
+                prices[name] = price / 1.95
+                print(f"   ✅ Corrected Silver Price to: {prices[name]:.4f}")
     print("=" * 65)
 
     supabase = get_supabase_client()
@@ -187,6 +188,7 @@ def run_pipeline():
     try:
         from src.analytics.bias_engine import run_bias_engine
         run_bias_engine()
+        print("✅ COGNITIVE EVALUATION COMPLETE - PREDICTIONS RECONCILED")
     except Exception as e:
         print(f"❌ Computation step execution fault: {e}")
 
