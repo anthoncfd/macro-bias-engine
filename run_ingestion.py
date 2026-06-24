@@ -1,48 +1,54 @@
 """
-MACRO BIAS ENGINE - Main Ingestion Pipeline
-Uses direct Yahoo JSON API for historical data extraction.
-Bypasses yfinance library completely while resolving cookie/crumb blocks.
+MACRO BIAS ENGINE - Ingestion Pipeline
+Downloads and archives spot assets and cross-market systematic macro anchors.
 """
 import sys
 import os
 import time
 import requests
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from src.database.supabase_client import get_supabase_client
-from src.ingestion.market_prices import fetch_all_prices, FOREX_PAIRS, ASSETS
+from src.ingestion.market_prices import fetch_all_prices, FOREX_PAIRS
 
-def fetch_historical_prices(ticker, days_back=20):
-    """
-    Fetches historical daily close data for a ticker using the direct Yahoo JSON endpoint.
-    Establishes an initial session handshake to bypass 401 Unauthorized errors.
-    """
+# Explicitly declare expanded asset-to-ticker mapping internally to ensure safety
+TARGET_REGISTRY = {
+    "XAUUSD": ["GC=F", "XAUUSD=X"],
+    "XAGUSD": ["SI=F", "XAGUSD=X"],
+    "BTCUSD": ["BTC-USD"],
+    "JP225": ["^N225"],
+    "US30": ["^DJI"],
+    "EURUSD": ["EURUSD=X"],
+    "GBPUSD": ["GBPUSD=X"],
+    "AUDUSD": ["AUDUSD=X"],
+    "EURJPY": ["EURJPY=X"],
+    "GBPJPY": ["GBPJPY=X"],
+    "CADJPY": ["CADJPY=X"],
+    "CADCHF": ["CADCHF=X"],
+    # 🏛️ Global Macro Intermarket Pillars
+    "DXY": ["DX-Y.NYB"],
+    "VIX": ["^VIX"],
+    "US10Y": ["^TNX"]
+}
+
+def fetch_historical_prices(ticker, days_back=35):
+    """Fetches clean historical close sequences using direct Yahoo endpoints."""
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-    params = {
-        "range": f"{days_back}d",
-        "interval": "1d",
-        "includeTimestamps": "true"
-    }
+    params = {"range": f"{days_back}d", "interval": "1d", "includeTimestamps": "true"}
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Origin": "https://finance.yahoo.com",
         "Referer": "https://finance.yahoo.com/"
     }
-    
     try:
         session = requests.Session()
-        # Initial handshake to collect cookies required by Yahoo's security matrix
         session.get("https://finance.yahoo.com", headers=headers, timeout=5)
-        
         response = session.get(url, headers=headers, params=params, timeout=10)
         
         if response.status_code != 200:
-            print(f"   ❌ API returned status code {response.status_code} for {ticker}")
             return None
             
         data = response.json()
@@ -51,68 +57,48 @@ def fetch_historical_prices(ticker, days_back=20):
             return None
             
         timestamps = result.get("timestamp", [])
-        indicators = result.get("indicators", {}).get("quote", [{}])[0]
-        closes = indicators.get("close", [])
+        closes = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
         
-        if not closes or not timestamps:
-            return None
-            
-        # Standardize matching JSON indices into clean DataFrames
-        formatted_dates = []
-        clean_closes = []
-        for ts, close in zip(timestamps, closes):
-            if ts is None or close is None:
+        formatted_dates, clean_closes = [], []
+        for ts, cls in zip(timestamps, closes):
+            if ts is None or cls is None:
                 continue
             formatted_dates.append(datetime.fromtimestamp(ts).strftime("%Y-%m-%d"))
-            clean_closes.append(float(close))
+            clean_closes.append(float(cls))
             
-        df = pd.DataFrame({
-            "Date": formatted_dates,
-            "Close": clean_closes
-        })
-        return df
-        
-    except Exception as e:
-        print(f"   ⚠️ Historical direct API fetch error for {ticker}: {e}")
+        return pd.DataFrame({"Date": formatted_dates, "Close": clean_closes})
+    except Exception:
         return None
 
-def run_backfill(days_back=15):
-    """Backfill historical data using direct API infrastructure."""
-    print(f"\n📥 BACKFILLING {days_back} days of historical data...")
-    print("=" * 55)
-    
+def run_backfill(days_back=35):
+    """Backfills history to satisfy technical indicators requiring historical depth."""
+    print(f"\n📥 Forcing {days_back}-day structural historical backfill...")
     supabase = get_supabase_client()
     total_inserted = 0
     
-    for display_name, tickers in ASSETS.items():
-        print(f"\n📊 Processing {display_name}...")
+    for display_name, tickers in TARGET_REGISTRY.items():
         df = None
         for ticker in tickers:
             df = fetch_historical_prices(ticker, days_back=days_back)
             if df is not None and not df.empty:
-                print(f"   ✅ Downloaded ticker: {ticker}")
                 break
-            time.sleep(1)
-        
+            time.sleep(0.5)
+            
         if df is None or df.empty:
-            print(f"   ❌ No structured JSON data found for {display_name}")
             continue
-        
-        for idx, row in df.iterrows():
+            
+        for _, row in df.iterrows():
             date_str = row["Date"]
             price = row["Close"]
             if pd.isna(price):
                 continue
-            
+                
             check = supabase.table("market_structure_logs") \
-                .select("id") \
-                .eq("ticker", display_name) \
-                .eq("created_at", date_str) \
-                .execute()
-            
+                .select("id").eq("ticker", display_name).eq("created_at", date_str).execute()
+                
             if check.data:
                 continue
-            
+                
             row_data = {
                 "ticker": display_name,
                 "latest_close": float(price),
@@ -120,97 +106,53 @@ def run_backfill(days_back=15):
                 "momentum_score": 0.0,
                 "created_at": date_str
             }
-            
             try:
                 supabase.table("market_structure_logs").insert(row_data).execute()
                 total_inserted += 1
-                print(f"   📅 {date_str}: {price}")
-            except Exception as e:
-                print(f"   ❌ Database sync crash: {e}")
-            time.sleep(0.05)
-        time.sleep(0.5)
-    
-    print(f"\n✅ Backfill complete! Inserted {total_inserted} rows.")
-    return total_inserted
+            except Exception:
+                pass
+    print(f"✅ Historical matrix synchronizer complete. Rows added: {total_inserted}")
 
 def get_row_count():
-    """Get number of distinct daily close points in database."""
+    """Validates real historical data points currently inside the database logs."""
     try:
         supabase = get_supabase_client()
-        result = supabase.table("market_structure_logs") \
-            .select("created_at") \
-            .order("created_at", desc=True) \
-            .limit(100) \
-            .execute()
-        
-        if not result.data:
-            return 0
-            
-        dates = {row['created_at'].split('T')[0] for row in result.data}
-        return len(dates)
-    except Exception as e:
-        print(f"   ⚠️ Row count check failed: {e}")
+        res = supabase.table("market_structure_logs").select("created_at").limit(100).execute()
+        return len({r['created_at'].split('T')[0] for r in res.data}) if res.data else 0
+    except Exception:
         return 0
 
 def run_pipeline():
-    """Executes the complete pipeline synchronization process."""
-    print("=" * 55)
-    print("🚀 MACRO BIAS ENGINE - INGESTION PIPELINE")
-    print(f"📅 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 55)
-
-    print("\n🔍 Checking database for sufficient historical depth...")
+    """Main execution pipeline runner."""
+    print("🚀 INITIALIZING INTEL INGESTION PIPELINE RUN")
+    
     row_count = get_row_count()
-    print(f"   📊 Found {row_count} distinct daily points in database")
+    if row_count < 20:
+        run_backfill(days_back=35)
+        
+    prices = fetch_all_prices() or {}
+    
+    # Manually append macro assets to fetch queue if missing from market_prices output
+    for display_name, tickers in TARGET_REGISTRY.items():
+        if display_name not in prices or prices[display_name] is None:
+            for ticker in tickers:
+                df = fetch_historical_prices(ticker, days_back=2)
+                if df is not None and not df.empty:
+                    prices[display_name] = df["Close"].iloc[-1]
+                    break
 
-    if row_count < 10:
-        days_needed = 10 - row_count
-        print(f"\n⚠️ Only {row_count} days of data. Backfilling {days_needed + 5} more days...")
-        run_backfill(days_back=days_needed + 12)
-    else:
-        print("\n✅ Database has sufficient history. Skipping backfill.")
-
-    print("\n⏳ Waiting 3 seconds...")
-    time.sleep(3)
-
-    print("\n📊 Fetching live market data...")
-    prices = fetch_all_prices()
-
-    print("\n📊 Market Snapshot:")
-    for name, price in prices.items():
-        if price is None:
-            print(f"   ❌ {name:10} : No data")
-        elif name in FOREX_PAIRS:
-            print(f"   ✅ {name:10} : {price:.4f}")
-        else:
-            print(f"   ✅ {name:10} : ${price:,.2f}")
-
-    print("\n🔌 Connecting to Supabase...")
-    try:
-        supabase = get_supabase_client()
-        print("   ✅ Connection successful!")
-    except Exception as e:
-        print(f"   ❌ Connection failed: {e}")
-        return
-
-    print("\n📤 Syncing logs to 'market_structure_logs'...")
-    inserted_count = 0
+    supabase = get_supabase_client()
     today_string = datetime.now().strftime("%Y-%m-%d")
     
     for name, price in prices.items():
-        if price is None:
+        if price is None or name not in TARGET_REGISTRY:
             continue
             
-        dup_check = supabase.table("market_structure_logs") \
-            .select("id") \
-            .eq("ticker", name) \
-            .eq("created_at", today_string) \
-            .execute()
-            
-        if dup_check.data:
-            print(f"   ⚪ {name} already recorded for today ({today_string}). Skipping.")
+        dup = supabase.table("market_structure_logs") \
+            .select("id").eq("ticker", name).eq("created_at", today_string).execute()
+        if dup.data:
             continue
-
+            
         row = {
             "ticker": name,
             "latest_close": float(price),
@@ -220,26 +162,15 @@ def run_pipeline():
         }
         try:
             supabase.table("market_structure_logs").insert(row).execute()
-            print(f"   ✅ Inserted {name}")
-            inserted_count += 1
         except Exception as e:
-            print(f"   ❌ Failed {name}: {e}")
+            print(f"❌ Ingestion database sync failed for {name}: {e}")
 
-    print(f"\n📊 Inserted {inserted_count} assets today")
-
-    print("\n" + "=" * 55)
-    print("🧠 RUNNING QUANTITATIVE BIAS ENGINE")
-    print("=" * 55)
-    
+    print("🧠 BOOTING COGNITIVE EVALUATION LAYER")
     try:
         from src.analytics.bias_engine import run_bias_engine
         run_bias_engine()
     except Exception as e:
-        print(f"❌ Bias Engine execution crash: {e}")
-
-    print("\n" + "=" * 55)
-    print("✅ PIPELINE COMPLETE")
-    print("=" * 55)
+        print(f"❌ Computation step execution fault: {e}")
 
 if __name__ == "__main__":
     run_pipeline()
