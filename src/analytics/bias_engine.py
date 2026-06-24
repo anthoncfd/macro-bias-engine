@@ -1,7 +1,7 @@
 """
 MACRO BIAS ENGINE - Core Quant Analytics
-Calculates mathematically sound directional probabilities using proper distribution functions
-and registers predictions into the Supabase verification ledger.
+Calculates empirical asset distribution parameters using rolling data windows.
+Eliminates synthetic constants by utilizing true historical percentile rankings.
 """
 import numpy as np
 import pandas as pd
@@ -11,8 +11,8 @@ from src.database.supabase_client import get_supabase_client
 
 def calculate_bias_for_asset(ticker):
     """
-    Evaluates trend distribution to map exact statistical direction probabilities.
-    Replaces synthetic heuristics with standard normal curve mapping.
+    Evaluates historical trend sequences to derive real-world percentile metrics.
+    Replaces uncalibrated 'Probabilities' with empirical Directional Scores.
     """
     try:
         if ticker in ["DXY", "VIX", "US10Y"]:
@@ -20,37 +20,68 @@ def calculate_bias_for_asset(ticker):
 
         supabase = get_supabase_client()
 
-        # Gather price snapshots
+        # 1. Fetch historical series data
         res = supabase.table("market_structure_logs") \
             .select("*").eq("ticker", ticker).order("created_at", desc=True).limit(35).execute()
             
         if not res.data or len(res.data) < 20:
-            return {"status": "ERROR", "message": f"Insufficient database rows historical tracking sample."}
+            return {"status": "ERROR", "message": "Insufficient historical tracking rows."}
 
         df = pd.DataFrame(res.data).iloc[::-1].reset_index(drop=True)
         prices = df["latest_close"].astype(float).values
         
         current_price = prices[-1]
-        sma_20 = np.mean(prices[-20:])
-        std_20 = np.std(prices[-20:])
+        
+        # Calculate trailing 20-day baseline metrics
+        rolling_sample = prices[-20:]
+        sma_20 = np.mean(rolling_sample)
+        std_20 = np.std(rolling_sample)
         z_score = (current_price - sma_20) / std_20 if std_20 > 0 else 0.0
         momentum_pct = ((prices[-1] - prices[-2]) / prices[-2]) * 100
 
-        # Normal Cumulative Distribution Function (CDF) mapping
+        # 2. Historical Contextualization (Eliminating Magic 0.5 and 2.5 Numbers)
+        # Compute all rolling 20-day Z-scores in our sample window to find true empirical position
+        historical_z_scores = []
+        for i in range(20, len(prices) + 1):
+            window = prices[i-20:i]
+            window_mean = np.mean(window)
+            window_std = np.std(window)
+            if window_std > 0:
+                historical_z_scores.append((window[-1] - window_mean) / window_std)
+        
+        if not historical_z_scores:
+            historical_z_scores = [z_score]
+
+        # Determine exact empirical percentile rank of the current absolute Z-score
+        abs_historical = np.abs(historical_z_scores)
+        abs_current = abs(z_score)
+        signal_strength = (np.sum(abs_historical <= abs_current) / len(abs_historical)) * 100.0
+
+        # Pass through a standard logistic activation layer to form a bounded Directional Score
+        # This explicitly tells an end user the magnitude of trend alignment, NOT a win rate.
+        directional_score = 100 / (1 + np.exp(-z_score))
+
         if z_score < 0:
             direction = "BEARISH"
-            probability = norm.cdf(-z_score) * 100
         elif z_score > 0:
             direction = "BULLISH"
-            probability = norm.cdf(z_score) * 100
         else:
             direction = "NEUTRAL"
-            probability = 50.0
 
-        # Signal Strength calculated as standard deviation distance profile
-        signal_strength = min((abs(z_score) / 2.5) * 100, 100.0)
+        # 3. Structural Conviction Mapping derived entirely from Empirical Percentiles
+        if signal_strength < 35.0:
+            conviction = "LOW"
+        elif 35.0 <= signal_strength < 70.0:
+            conviction = "MODERATE"
+        elif 70.0 <= signal_strength < 90.0:
+            conviction = "HIGH"
+        else:
+            conviction = "EXTREME (MEAN REVERSION RISK)"
 
-        # Log to permanent verification ledger table
+        # 4. Anti-Contamination Logging (Problem #4): Prevent Multiple User Queries from Spamming Records
+        today_string = datetime.utcnow().strftime("%Y-%m-%d")
+        
+        # We enforce uniqueness by targeting combinations of Ticker and Ingestion Date
         prediction_row = {
             "ticker": ticker,
             "price": float(current_price),
@@ -58,14 +89,19 @@ def calculate_bias_for_asset(ticker):
             "z_score": float(z_score),
             "momentum_pct": float(momentum_pct),
             "direction": direction,
-            "probability": float(probability),
-            "signal_strength": float(signal_strength)
+            "probability": float(directional_score),  # Map to database schema legacy column name safely
+            "signal_strength": float(signal_strength),
+            "conviction": conviction,
+            "created_date_key": today_string  # Unique constraint binding anchor
         }
         
         try:
-            supabase.table("predictions").insert(prediction_row).execute()
+            # Use an upsert execution using your unique key definition to update rather than duplicate
+            supabase.table("predictions").upsert(
+                prediction_row, on_conflict="ticker,created_date_key"
+            ).execute()
         except Exception as log_error:
-            print(f"   ⚠️ Non-blocking logging failure to predictions table for {ticker}: {log_error}")
+            print(f"   ⚠️ Non-blocking database logging failure: {log_error}")
 
         return {
             "status": "SUCCESS",
@@ -75,8 +111,9 @@ def calculate_bias_for_asset(ticker):
             "z_score": z_score,
             "momentum_pct": momentum_pct,
             "direction": direction,
-            "probability": probability,
+            "directional_score": directional_score,
             "signal_strength": signal_strength,
+            "conviction": conviction,
             "last_update": df["created_at"].iloc[-1]
         }
     except Exception as e:
