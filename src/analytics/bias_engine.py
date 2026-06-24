@@ -11,8 +11,8 @@ from src.database.supabase_client import get_supabase_client
 
 def calculate_bias_for_asset(ticker):
     """
-    Evaluates historical trend distribution to generate clean probabilities.
-    Maps Z-scores to proper cumulative probabilities instead of synthetic heuristics.
+    Evaluates trend distribution to map exact statistical direction probabilities.
+    Replaces synthetic heuristics with standard normal curve mapping.
     """
     try:
         if ticker in ["DXY", "VIX", "US10Y"]:
@@ -20,12 +20,12 @@ def calculate_bias_for_asset(ticker):
 
         supabase = get_supabase_client()
 
-        # 1. Fetch historical data series
+        # Gather price snapshots
         res = supabase.table("market_structure_logs") \
             .select("*").eq("ticker", ticker).order("created_at", desc=True).limit(35).execute()
             
         if not res.data or len(res.data) < 20:
-            return {"status": "ERROR", "message": f"Insufficient historical tracking row sample."}
+            return {"status": "ERROR", "message": f"Insufficient database rows historical tracking sample."}
 
         df = pd.DataFrame(res.data).iloc[::-1].reset_index(drop=True)
         prices = df["latest_close"].astype(float).values
@@ -36,9 +36,7 @@ def calculate_bias_for_asset(ticker):
         z_score = (current_price - sma_20) / std_20 if std_20 > 0 else 0.0
         momentum_pct = ((prices[-1] - prices[-2]) / prices[-2]) * 100
 
-        # 2. Strict Quant Probability Mapping using Normal CDF
-        # If Z-Score is negative (below SMA), the probability of being Bearish is high.
-        # e.g., Z = -1.45 -> norm.cdf(1.45) = 92.6% Bearish Probability
+        # Normal Cumulative Distribution Function (CDF) mapping
         if z_score < 0:
             direction = "BEARISH"
             probability = norm.cdf(-z_score) * 100
@@ -49,11 +47,10 @@ def calculate_bias_for_asset(ticker):
             direction = "NEUTRAL"
             probability = 50.0
 
-        # 3. Rename metric to Signal Strength (Distance from the anchor mean)
-        # Expressed as percentage density inside a 2.5 standard deviation boundary
+        # Signal Strength calculated as standard deviation distance profile
         signal_strength = min((abs(z_score) / 2.5) * 100, 100.0)
 
-        # 4. Strict Quant Requirement: Log Every Prediction to Supabase
+        # Log to permanent verification ledger table
         prediction_row = {
             "ticker": ticker,
             "price": float(current_price),
@@ -78,8 +75,8 @@ def calculate_bias_for_asset(ticker):
             "z_score": z_score,
             "momentum_pct": momentum_pct,
             "direction": direction,
-            "probability": probability,      # Proper Statistical CDF Probability
-            "signal_strength": signal_strength,  # Replaces 'System Confidence'
+            "probability": probability,
+            "signal_strength": signal_strength,
             "last_update": df["created_at"].iloc[-1]
         }
     except Exception as e:
