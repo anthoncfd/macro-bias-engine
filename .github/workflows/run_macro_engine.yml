@@ -1,12 +1,23 @@
-name: Macro Bias Engine - Daily Ingestion
+name: Macro Bias Engine - Daily Pipeline
 
 on:
   schedule:
-    # Triggers daily at 22:10 UTC (Monday to Friday) representing New York Close + 10m settlement
+    # 22:10 UTC: Ingestion (NY Close + 10 min)
     - cron: '10 22 * * 1-5'
-  workflow_dispatch:  # Allows manual user executions directly from GitHub UI panel
+    # 22:20 UTC: Outcome Resolution (after ingestion completes)
+    - cron: '20 22 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      backfill_days:
+        description: 'Number of days to backfill (0 = normal run)'
+        required: false
+        default: '0'
+        type: number
 
 jobs:
+  # ==========================================
+  # JOB 1: DATA INGESTION
+  # ==========================================
   ingest-data:
     runs-on: ubuntu-latest
     
@@ -26,7 +37,34 @@ jobs:
       - name: Run ingestion pipeline
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}  # Verify this is your high-privilege service_role token key
-          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          BACKFILL_DAYS: ${{ github.event.inputs.backfill_days }}
         run: |
           python run_ingestion.py
+
+  # ==========================================
+  # JOB 2: OUTCOME RESOLUTION (Walk-Forward)
+  # ==========================================
+  resolve-outcomes:
+    runs-on: ubuntu-latest
+    needs: ingest-data  # Runs AFTER ingestion completes
+    
+    steps:
+      - name: Checkout repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run outcome resolver
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python -c "from src.pipeline.outcome_resolver import run_outcome_resolution; run_outcome_resolution()"
