@@ -28,17 +28,15 @@ def calculate_bias_for_asset(ticker, live_price_override=None):
 
         raw_data = res.data if res and res.data else []
 
-        # 2. Append real-time override snapshot string if passed explicitly by pipeline
+        # 2. Append real-time override snapshot if passed explicitly by pipeline
         if live_price_override is not None:
-            # Avoid inserting duplicate metrics if today's record already loaded
             if not raw_data or abs(float(raw_data[0]["latest_close"]) - float(live_price_override)) > 1e-6:
                 raw_data.insert(0, {"latest_close": float(live_price_override)})
 
         if len(raw_data) < 20:
             raise IndexError(f"Insufficient history data points. Matrix count is {len(raw_data)}/20")
 
-        # 3. CRITICAL: Reverse array back to chronological ascending order (past -> present)
-        # This keeps sliding range windows index-accurate for momentum analysis
+        # 3. Reverse array back to chronological ascending order (past -> present)
         raw_data.reverse()
 
         # 4. Extract and force float primitives cleanly
@@ -46,7 +44,6 @@ def calculate_bias_for_asset(ticker, live_price_override=None):
 
         # 5. Core Analytical Sequences
         current_price = closes[-1]
-        prior_close = closes[-2]
 
         # Indicator A: Simple Moving Average (20-Period Baseline Tracking)
         sma_20 = sum(closes[-20:]) / 20
@@ -61,23 +58,22 @@ def calculate_bias_for_asset(ticker, live_price_override=None):
         momentum_factor = ((current_price - lookback_price_5d) / lookback_price_5d) * 100
 
         # 6. Unified Directional Bias Scoring Model (0 to 100 Matrix Scales)
-        # Base matrix rests at equilibrium midpoint (50)
-        directional_score = 50.0
+        calculated_score = 50.0
 
         # Apply trend component shifts
         if current_price > sma_20:
-            directional_score += 15.0  # Bullish expansion tier
+            calculated_score += 15.0  # Bullish expansion tier
         else:
-            directional_score -= 15.0  # Bearish distribution tier
+            calculated_score -= 15.0  # Bearish distribution tier
 
         # Apply short-term velocity adjustments 
-        directional_score += (momentum_factor * 10.0)
-        directional_score = max(0.0, min(100.0, directional_score)) # Keep clamped within standard limits
+        calculated_score += (momentum_factor * 10.0)
+        calculated_score = max(0.0, min(100.0, calculated_score)) # Keep clamped within standard limits
 
         # 7. Map Classification Bands & Standard Deviation Conviction Thresholds
-        if directional_score >= 70:
+        if calculated_score >= 70:
             trend_signal = "BULLISH"
-        elif directional_score <= 30:
+        elif calculated_score <= 30:
             trend_signal = "BEARISH"
         else:
             trend_signal = "NEUTRAL"
@@ -96,12 +92,12 @@ def calculate_bias_for_asset(ticker, live_price_override=None):
             else:
                 conviction_rating = "LOW"
 
-        # 8. Record Outputs to Central Cloud Analytics Database Table
+        # 8. Record Outputs to Central Database Using Exact Database Column Schema Mapping
         created_date_key = datetime_to_date_key()
         prediction_record = {
             "ticker": ticker,
             "created_date_key": created_date_key,
-            "directional_score": round(directional_score, 2),
+            "momentum_score": round(calculated_score, 2),  # Fixed target schema map name
             "trend": trend_signal,
             "conviction": conviction_rating,
             "latest_close": current_price
@@ -113,10 +109,11 @@ def calculate_bias_for_asset(ticker, live_price_override=None):
             on_conflict="ticker,created_date_key"
         ).execute()
 
+        # Return layout back to run_ingestion pipeline tracker
         return {
             "status": "SUCCESS",
             "ticker": ticker,
-            "directional_score": directional_score,
+            "directional_score": calculated_score,
             "trend": trend_signal,
             "conviction": conviction_rating
         }
