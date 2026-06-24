@@ -30,18 +30,20 @@ def internal_health():
     """Backup endpoint path for service verification checks."""
     return {"status": "healthy", "engine": "active"}, 200
 
-# 3. Presentation Formatting Engines
+# 3. Layout Formatting Output Engines
 def generate_help_markdown() -> str:
     """Generates an elegant operational manual for the chat interface."""
     msg = (
         "🤖 *MACRO BIAS ENGINE DIRECTORY*\n"
         "‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n"
-        "Query empirical asset deviation statistics using the following handles:\n\n"
+        "Query quantitative asset deviation statistics using the following handles:\n\n"
         "💱 *Forex Pairs:*\n"
         "• `/eurusd` | `/gbpusd` | `/audusd` \n"
         "• `/eurjpy` | `/gbpjpy` | `/cadjpy` | `/cadchf` \n\n"
         "🪙 *Commodities & Crypto:*\n"
-        "• `/xauusd` | `/xagusd` | `/btcusd` \n\n"
+        "• `/xauusd` _(Spot Gold)_\n"
+        "• `/xagusd` _(Spot Silver)_\n"
+        "• `/btcusd` _(Bitcoin Context)_\n\n"
         "📈 *Equity Indices:*\n"
         "• `/us30` | `/jp225` \n\n"
         "⚙️ *System Macros:*\n"
@@ -58,7 +60,7 @@ def generate_telegram_markdown(ticker: str, data: dict) -> str:
         f"📊 *MACRO PROFILE: {ticker}*\n"
         f"📅 _As of: {data['last_update']}_\n"
         f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n"
-        f"💵 *Close:* {data['latest_close']:.4f}\n"
+        f"💵 *Current Price:* {data['latest_close']:.4f}\n"
         f"📉 *20-Day SMA:* {data['sma_20']:.4f}\n"
         f"🎚️ *Z-Score Boundary:* {data['z_score']:.2f}\n"
         f"🚀 *Momentum Velocity:* {data['momentum_pct']:+.2f}%\n\n"
@@ -75,23 +77,31 @@ async def handle_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(generate_help_markdown(), parse_mode="Markdown")
 
 async def handle_bias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Processes asset requests by pulling from the multi-factor analytical model."""
+    """Processes asset requests by pulling true live market price arrays dynamically."""
     user_input = " ".join(context.args).upper().strip() if context.args else ""
     
+    # Text router tracking fallback logic
     if not user_input and update.message and update.message.text:
         raw_cmd = update.message.text.split()[0].lower()
         if len(raw_cmd) > 1:
             user_input = raw_cmd[1:].upper()
 
     if not user_input or user_input == "BIAS":
-        await update.message.reply_text("⚠️ Please pass a valid asset ticker. (Example: `/bias EURUSD`)", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Please pass a valid asset ticker. (Example: `/bias EURUSD` or `/eurusd`)", parse_mode="Markdown")
         return
 
     try:
         from src.analytics.bias_engine import calculate_bias_for_asset
+        # Dynamic middleware hook connecting to your live raw provider API or scraper feed
+        from src.ingestion.market_prices import fetch_live_feed_price 
         
         await update.message.reply_chat_action("typing")
-        metrics = calculate_bias_for_asset(user_input)
+        
+        # 1. Fetch real-time market value right on demand
+        live_spot_price = fetch_live_feed_price(user_input) 
+        
+        # 2. Route real-time price directly into the updated analytical framework
+        metrics = calculate_bias_for_asset(user_input, live_price_override=live_spot_price)
         
         if metrics.get("status") == "SUCCESS":
             formatted_text = generate_telegram_markdown(user_input, metrics)
@@ -105,10 +115,10 @@ async def handle_bias_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.error(f"Telegram execution exception context: {e}")
         await update.message.reply_text("💥 Internal processor calculation exception occurred.")
 
-# 5. Dedicated Background Thread Lifecyle Polling Loop
+# 5. Dedicated Background Thread Lifecycle Polling Loop
 def run_telegram_bot():
     """Initializes and runs the background bot process using an active event loop."""
-    # 🛡️ HARDENED SECURITY FIX (Problem #5): Fail immediately if credentials are missing
+    # 🛡️ HARDENED SECURITY FIX: Program crashes immediately if credentials aren't set up properly
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         critical_error = "CRITICAL RUNTIME ERROR: TELEGRAM_BOT_TOKEN environment variable is missing!"
@@ -120,9 +130,11 @@ def run_telegram_bot():
     
     app = ApplicationBuilder().token(token).build()
     
-    # Register functional command system hooks
+    # System operation registration commands
     app.add_handler(CommandHandler("help", handle_help_command))
     app.add_handler(CommandHandler("bias", handle_bias_command))
+    
+    # Explicit ticker mapping rules
     app.add_handler(CommandHandler("gbpusd", handle_bias_command))
     app.add_handler(CommandHandler("eurusd", handle_bias_command))
     app.add_handler(CommandHandler("eurjpy", handle_bias_command))
@@ -133,6 +145,7 @@ def run_telegram_bot():
     logger.info("🤖 Polling engine fully active. Overriding competing handles...")
     
     loop.run_until_complete(app.initialize())
+    # Drop pending updates to clean old deployment web hooks out of the stack instantly
     loop.run_until_complete(app.updater.start_polling(drop_pending_updates=True))
     loop.run_until_complete(app.start())
     
@@ -145,7 +158,7 @@ def run_telegram_bot():
         loop.run_until_complete(app.shutdown())
         loop.close()
 
-# 6. Primary Inception Execution block
+# 6. Primary Orchestration Execution block
 if __name__ == "__main__":
     bot_thread = threading.Thread(target=run_telegram_bot, daemon=True)
     bot_thread.start()
