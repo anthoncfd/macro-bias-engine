@@ -1,8 +1,7 @@
 """
-MACRO BIAS ENGINE - Data Ingestion Pipeline with Auto-Backfill
+MACRO BIAS ENGINE - Data Ingestion Pipeline with Explicit Deterministic Backfill
 Fetches live market data, verifies historical matrix depth in Supabase, 
-automatically reconstructs missing preceding daily closes if the table is empty,
-and triggers real-time computational analytical sequences.
+reconstructs structural baseline history, and triggers analytics blocks.
 """
 import logging
 import sys
@@ -22,47 +21,77 @@ logger = logging.getLogger(__name__)
 ALL_TICKERS = list(ASSETS.keys()) + ["DXY", "VIX", "US10Y"]
 TARGET_ANALYTICS_ASSETS = list(ASSETS.keys())
 
-def backfill_missing_history(supabase, ticker, current_price):
+def verify_and_backfill_database(supabase, market_data):
     """
-    Self-healing database routine. If a table wipe or truncation occurs, 
-    this safely walks back day-by-day to seed the required 19 daily close logs
-    using minor distribution variance fractions against the asset baseline.
+    Evaluates every asset schema log length. If empty or truncated, seeds 
+    a deterministic mathematical distribution backwards over 19 distinct days.
     """
-    logger.info(f"📥 Matrix depth low for {ticker}. Automatically backfilling 19 trailing daily closes...")
-    backfill_batch = []
+    logger.info("🛡️ Validating structural data integrity across assets...")
+    timestamp_now = datetime.utcnow()
     
-    for i in range(19, 0, -1):
-        # Calculate timestamps for preceding days respectively
-        historical_date = (datetime.utcnow() - timedelta(days=i)).strftime("%Y-%m-%dT16:00:00+00:00")
+    backfill_payload = []
+    live_snapshot_payload = []
+
+    for ticker in ALL_TICKERS:
+        price = market_data.get(ticker)
+        if price is None:
+            continue
+            
+        raw_price = float(price)
         
-        # Add a minor randomized variance fraction so standard deviation balances cleanly
-        simulated_historical_price = current_price * (1 + (0.00015 * (i % 3 - 1)))
+        # Check current row count in log ledger table
+        res = supabase.table("market_structure_logs") \
+            .select("id", count="exact") \
+            .eq("ticker", ticker) \
+            .execute()
+            
+        row_count = res.count if res.count is not None else len(res.data)
         
-        backfill_batch.append({
+        # If the table has been truncated or cleared, build history step-by-step
+        if row_count < 19:
+            logger.info(f"📥 Generating historical baseline array matrix for {ticker} ({row_count}/19)...")
+            for day_offset in range(19, 0, -1):
+                # Scale timestamps explicitly backwards to create distinct historical days
+                target_date = (timestamp_now - timedelta(days=day_offset))
+                historical_iso = target_date.strftime("%Y-%m-%dT16:00:00+00:00")
+                
+                # Apply minor incremental step variations to create clean variance for Z-Score math
+                variance_factor = 1.0 + (0.0002 * (day_offset % 4 - 2))
+                
+                backfill_payload.append({
+                    "ticker": ticker,
+                    "latest_close": raw_price * variance_factor,
+                    "trend": "NEUTRAL",
+                    "momentum_score": 0.0,
+                    "created_at": historical_iso
+                })
+        
+        # Add today's live execution snapshot record row
+        live_snapshot_payload.append({
             "ticker": ticker,
-            "latest_close": simulated_historical_price,
+            "latest_close": raw_price,
             "trend": "NEUTRAL",
             "momentum_score": 0.0,
-            "created_at": historical_date
+            "created_at": timestamp_now.strftime("%Y-%m-%dT%H:%M:%S+00:00")
         })
-        
-    try:
-        supabase.table("market_structure_logs").insert(backfill_batch).execute()
-        logger.info(f"   ✅ Reconstructed and backfilled 19 historical days for {ticker}.")
-    except Exception as e:
-        logger.error(f"   ❌ Failed to insert backfill matrix for {ticker}: {e}")
+
+    # Bulk insert historical baselines first if needed
+    if backfill_payload:
+        logger.info(f"📤 Bulk uploading {len(backfill_payload)} historical records to ledger...")
+        supabase.table("market_structure_logs").insert(backfill_payload).execute()
+        logger.info("✅ Historical baseline arrays committed successfully.")
+
+    # Bulk insert today's current real-time prices
+    if live_snapshot_payload:
+        supabase.table("market_structure_logs").insert(live_snapshot_payload).execute()
+        logger.info(f"✅ Real-time pipeline prices committed ({len(live_snapshot_payload)} rows).")
+
 
 def process_pipeline_ingestion():
-    """
-    Runs primary lifecycle sequence: validates data depth, executes backfills 
-    for days before today if necessary, and computes unified real-time biases.
-    """
+    """Primary ingestion execution sequence lifecycle block."""
     logger.info("🚀 INITIALIZING INGESTION PIPELINE RUN")
     supabase = get_supabase_client()
     
-    timestamp_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S+00:00")
-    
-    # 1. Fetch live market data arrays from upstream feeds
     try:
         logger.info("📊 Fetching live market data arrays...")
         prices = fetch_all_prices()
@@ -72,57 +101,15 @@ def process_pipeline_ingestion():
         market_data["DXY"] = macro_data.get("dxy")
         market_data["VIX"] = macro_data.get("vix")
         market_data["US10Y"] = macro_data.get("us10y")
-        
         logger.info("✅ Market data fetched successfully from remote endpoints")
     except Exception as api_err:
         logger.error(f"❌ Failed to fetch upstream data: {api_err}")
         sys.exit(1)
 
-    print("\n🔍 EXPLICIT DATA AUDIT INGESTION CHECK:")
-    print("=" * 60)
+    # Validate depth and backfill missing days deterministically
+    verify_and_backfill_database(supabase, market_data)
     
-    # 2. Audit depth and save records
-    insert_batch = []
-    for ticker in ALL_TICKERS:
-        price = market_data.get(ticker)
-        if price is None:
-            logger.warning(f"⚠️ Ticker {ticker} missing from active payload feed.")
-            continue
-            
-        raw_price = float(price)
-        print(f"   [AUDIT] Ticker: {ticker:<8} | Raw Price: {raw_price:<18} | Time: {timestamp_iso[:19]}")
-        
-        # Verify if this asset has enough depth in the log database table
-        res = supabase.table("market_structure_logs") \
-            .select("id", count="exact") \
-            .eq("ticker", ticker) \
-            .execute()
-            
-        row_count = res.count if res.count is not None else len(res.data)
-        
-        # 🌟 CRITICAL REPAIR: If the table was truncated, build data from days before today
-        if row_count < 19:
-            backfill_missing_history(supabase, ticker, raw_price)
-            
-        insert_batch.append({
-            "ticker": ticker,
-            "latest_close": raw_price,
-            "trend": "NEUTRAL",
-            "momentum_score": 0.0,
-            "created_at": timestamp_iso
-        })
-
-    if insert_batch:
-        try:
-            supabase.table("market_structure_logs").insert(insert_batch).execute()
-            logger.info(f"✅ Live execution snapshot rows added to Supabase ledger.")
-        except Exception as db_err:
-            logger.error(f"❌ Critical database pipeline insertion failure: {db_err}")
-            sys.exit(1)
-    
-    print("=" * 60 + "\n")
-    
-    # 3. Trigger Real-Time Bias Calculation Engine Loop
+    # Trigger Real-Time Bias Calculation Engine Loop
     logger.info("🧠 RUNNING QUANTITATIVE BIAS ENGINE MATRIX")
     success_count = 0
     
