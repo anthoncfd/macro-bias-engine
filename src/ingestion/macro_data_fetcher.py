@@ -4,7 +4,6 @@ MACRO DATA FETCHER - Fetches DXY, VIX, Yields from Yahoo Finance
 import requests
 import time
 import random
-import numpy as np
 
 def fetch_macro_data():
     """
@@ -50,8 +49,7 @@ def fetch_macro_data():
     else:
         results["spread"] = None
     
-    # Generate Z-scores (simplified for now)
-    # In production, these would use rolling historical means
+    # Z-scores (simplified, would normally use rolling means)
     results["dxy_z"] = (results.get("dxy", 100) - 103) / 3
     results["vix_z"] = (results.get("vix", 20) - 18) / 5
     results["spread_z"] = (results.get("spread", 0.5) - 0.3) / 0.2
