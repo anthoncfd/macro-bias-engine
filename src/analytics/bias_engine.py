@@ -1,123 +1,143 @@
 """
-MACRO BIAS ENGINE - Core Quant Analytics
-Calculates mathematically unified, standardized distribution vectors 
-utilizing real-time price injections to ensure up-to-the-second analytical precision.
+MACRO BIAS ENGINE - Core Analytics Engine
+Processes trailing asset closes, handles multi-day mathematical lookbacks,
+and evaluates quantitative directional momentum profiles with error safety rails.
 """
 import logging
-import numpy as np
-import pandas as pd
-from datetime import datetime
-from scipy.stats import norm
+import math
+import traceback
 from src.database.supabase_client import get_supabase_client
 
 logger = logging.getLogger(__name__)
 
 def calculate_bias_for_asset(ticker, live_price_override=None):
     """
-    Unified real-time statistical engine block.
-    Appends live OTC prices to trailing historical data frames to guarantee
-    mathematical accuracy during high-volatility structural expansion events.
+    Computes real-time trend bias metrics using a 20-period matrix.
+    Safely catches array depth constraints and updates the predictions ledger table.
     """
     try:
-        if ticker in ["DXY", "VIX", "US10Y"]:
-            return {"status": "SKIP", "message": "Benchmark anchor asset."}
-
         supabase = get_supabase_client()
 
-        # 1. Pull trailing 19 records from history (leaving slot 20 for real-time live data)
+        # 1. Pull the 20 most recent logs to satisfy the quantitative tracking matrix
         res = supabase.table("market_structure_logs") \
             .select("latest_close, created_at") \
             .eq("ticker", ticker) \
             .order("created_at", desc=True) \
-            .limit(19).execute()
-            
-        if not res.data or len(res.data) < 19:
-            return {"status": "ERROR", "message": f"Incomplete baseline historical arrays for {ticker}."}
+            .limit(20) \
+            .execute()
 
-        # Invert data frame stack to chronologically linear order (oldest to newest)
-        df = pd.DataFrame(res.data).iloc[::-1].reset_index(drop=True)
-        historical_prices = df["latest_close"].astype(float).tolist()
+        raw_data = res.data if res and res.data else []
 
-        # 2. Process real-time price injection parameters
+        # 2. Append real-time override snapshot string if passed explicitly by pipeline
         if live_price_override is not None:
-            current_price = float(live_price_override)
-            logger_timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S+00:00")
+            # Avoid inserting duplicate metrics if today's record already loaded
+            if not raw_data or abs(float(raw_data[0]["latest_close"]) - float(live_price_override)) > 1e-6:
+                raw_data.insert(0, {"latest_close": float(live_price_override)})
+
+        if len(raw_data) < 20:
+            raise IndexError(f"Insufficient history data points. Matrix count is {len(raw_data)}/20")
+
+        # 3. CRITICAL: Reverse array back to chronological ascending order (past -> present)
+        # This keeps sliding range windows index-accurate for momentum analysis
+        raw_data.reverse()
+
+        # 4. Extract and force float primitives cleanly
+        closes = [float(row["latest_close"]) for row in raw_data]
+
+        # 5. Core Analytical Sequences
+        current_price = closes[-1]
+        prior_close = closes[-2]
+
+        # Indicator A: Simple Moving Average (20-Period Baseline Tracking)
+        sma_20 = sum(closes[-20:]) / 20
+
+        # Indicator B: Historical Volatility Matrix (Standard Deviation over 14-Periods)
+        sma_14 = sum(closes[-14:]) / 14
+        variance = sum((x - sma_14) ** 2 for x in closes[-14:]) / 14
+        std_dev = math.sqrt(variance)
+
+        # Indicator C: Momentum Rate-of-Change Factor (5-Period Velocity Vector)
+        lookback_price_5d = closes[-5]
+        momentum_factor = ((current_price - lookback_price_5d) / lookback_price_5d) * 100
+
+        # 6. Unified Directional Bias Scoring Model (0 to 100 Matrix Scales)
+        # Base matrix rests at equilibrium midpoint (50)
+        directional_score = 50.0
+
+        # Apply trend component shifts
+        if current_price > sma_20:
+            directional_score += 15.0  # Bullish expansion tier
         else:
-            # Safe runtime fallback if live price feed component drops
-            current_price = historical_prices[-1]
-            logger_timestamp = df["created_at"].iloc[-1]
-            logger.warning(f"⚠️ Live price override missing for {ticker}. Falling back to database snapshot.")
+            directional_score -= 15.0  # Bearish distribution tier
 
-        # 3. Form a mathematically unified 20-day window matrix
-        complete_window = np.array(historical_prices + [current_price])
+        # Apply short-term velocity adjustments 
+        directional_score += (momentum_factor * 10.0)
+        directional_score = max(0.0, min(100.0, directional_score)) # Keep clamped within standard limits
 
-        # Compute rolling parameters against the dynamic real-time dataset
-        sma_20 = np.mean(complete_window)
-        std_20 = np.std(complete_window)
-        z_score = (current_price - sma_20) / std_20 if std_20 > 0 else 0.0
-        
-        # Calculate true momentum velocity against yesterday's actual settled close price
-        momentum_pct = ((current_price - historical_prices[-1]) / historical_prices[-1]) * 100
-
-        # 4. Bounded Directional Score Matrix (Logistic Activation Curve Mapping)
-        directional_score = 100 / (1 + np.exp(-z_score))
-
-        if z_score < 0:
-            direction = "BEARISH"
-        elif z_score > 0:
-            direction = "BULLISH"
+        # 7. Map Classification Bands & Standard Deviation Conviction Thresholds
+        if directional_score >= 70:
+            trend_signal = "BULLISH"
+        elif directional_score <= 30:
+            trend_signal = "BEARISH"
         else:
-            direction = "NEUTRAL"
+            trend_signal = "NEUTRAL"
 
-        # 5. Mathematically Unified Signal Strength (Standard Gaussian Curve Coverage)
-        abs_z = abs(z_score)
-        signal_strength = (2 * norm.cdf(abs_z) - 1) * 100.0
-
-        # 6. Standard Institutional Sigma Band Conviction Routing
-        if abs_z < 1.0:
-            conviction = "LOW (TREND NOISE)"
-        elif 1.0 <= abs_z < 2.0:
-            conviction = "MODERATE (DEVELOPING TREND)"
-        elif 2.0 <= abs_z < 3.0:
-            conviction = "HIGH (EXTENDED DISTRIBUTION)"
+        # Determine conviction weight using volatility deviations
+        if std_dev == 0:
+            conviction_rating = "LOW"
         else:
-            conviction = "EXTREME (MEAN REVERSION RISK)"
+            deviation_distance = abs(current_price - sma_14) / std_dev
+            if deviation_distance > 2.0:
+                conviction_rating = "EXTREME"
+            elif deviation_distance > 1.2:
+                conviction_rating = "HIGH"
+            elif deviation_distance > 0.6:
+                conviction_rating = "MODERATE"
+            else:
+                conviction_rating = "LOW"
 
-        # 7. Prevent Duplicate Daily Writes via Unique Idempotent Constraint Keys
-        today_string = datetime.utcnow().strftime("%Y-%m-%d")
-        prediction_row = {
+        # 8. Record Outputs to Central Cloud Analytics Database Table
+        created_date_key = datetime_to_date_key()
+        prediction_record = {
             "ticker": ticker,
-            "price": float(current_price),
-            "sma_20": float(sma_20),
-            "z_score": float(z_score),
-            "momentum_pct": float(momentum_pct),
-            "direction": direction,
-            "probability": float(directional_score), # Retains compatibility with your legacy schema column naming
-            "signal_strength": float(signal_strength),
-            "conviction": conviction,
-            "created_date_key": today_string
+            "created_date_key": created_date_key,
+            "directional_score": round(directional_score, 2),
+            "trend": trend_signal,
+            "conviction": conviction_rating,
+            "latest_close": current_price
         }
-        
-        try:
-            supabase.table("predictions").upsert(
-                prediction_row, on_conflict="ticker,created_date_key"
-            ).execute()
-        except Exception as log_error:
-            logger.error(f"⚠️ Non-blocking database ledger logging failure: {log_error}")
+
+        # Safe upsert mapping using table primary key constraints
+        supabase.table("predictions").upsert(
+            prediction_record, 
+            on_conflict="ticker,created_date_key"
+        ).execute()
 
         return {
             "status": "SUCCESS",
             "ticker": ticker,
-            "latest_close": current_price,
-            "sma_20": sma_20,
-            "z_score": z_score,
-            "momentum_pct": momentum_pct,
-            "direction": direction,
             "directional_score": directional_score,
-            "signal_strength": signal_strength,
-            "conviction": conviction,
-            "last_update": logger_timestamp
+            "trend": trend_signal,
+            "conviction": conviction_rating
         }
-    except Exception as e:
-        logger.error(f"💥 Core calculation crash on asset {ticker}: {e}")
-        return {"status": "CRASH", "message": str(e)}
+
+    except IndexError as idx_err:
+        logger.warning(f"⚠️ Index limits hit processing analytics matrix for {ticker}: {idx_err}")
+        return {"status": "ERROR", "message": f"Array sizing index constraint: {str(idx_err)}"}
+
+    except ZeroDivisionError:
+        logger.warning(f"⚠️ Flatline division constraint detected on asset calculation sequence: {ticker}")
+        return {"status": "ERROR", "message": "Zero division encountered inside velocity formula scale."}
+
+    except Exception as general_err:
+        logger.error(f"💥 Internal processor calculation exception occurred for {ticker}: {str(general_err)}")
+        print("\n=== RAW ENGINE MATHEMATICAL EXCEPTION TRACEBACK ===")
+        traceback.print_exc()
+        print("===================================================\n")
+        return {"status": "ERROR", "message": str(general_err)}
+
+
+def datetime_to_date_key():
+    """Generates an integer calendar primary key string matching standard database schemas."""
+    from datetime import datetime
+    return int(datetime.utcnow().strftime("%Y%m%d"))
