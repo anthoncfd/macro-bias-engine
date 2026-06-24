@@ -30,18 +30,29 @@ def internal_health():
     """Backup endpoint path for service verification checks."""
     return {"status": "healthy", "engine": "active"}, 200
 
-# 3. Core Analytical Signal Formatters
+# 3. Presentation Formatting Engines
+def generate_help_markdown() -> str:
+    """Generates an elegant operational manual for the chat interface."""
+    msg = (
+        "🤖 *MACRO BIAS ENGINE DIRECTORY*\n"
+        "‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n"
+        "Query empirical asset deviation statistics using the following handles:\n\n"
+        "💱 *Forex Pairs:*\n"
+        "• `/eurusd` | `/gbpusd` | `/audusd` \n"
+        "• `/eurjpy` | `/gbpjpy` | `/cadjpy` | `/cadchf` \n\n"
+        "🪙 *Commodities & Crypto:*\n"
+        "• `/xauusd` | `/xagusd` | `/btcusd` \n\n"
+        "📈 *Equity Indices:*\n"
+        "• `/us30` | `/jp225` \n\n"
+        "⚙️ *System Macros:*\n"
+        "• `/bias [ticker]` — Run an arbitrary pair custom evaluation\n"
+        "• `/help` — Output this active documentation matrix"
+    )
+    return msg
+
 def generate_telegram_markdown(ticker: str, data: dict) -> str:
-    """Transforms structural raw macro engine profiles into highly polished Telegram copy."""
+    """Transforms raw empirical metrics into professionally precise copy layouts."""
     direction_emoji = "🟢 BULLISH" if data["direction"] == "BULLISH" else "🔴 BEARISH" if data["direction"] == "BEARISH" else "⚪ NEUTRAL"
-    
-    # Dynamic label styling depending on current direction profile
-    if data["direction"] == "BULLISH":
-        prob_label = "Bullish Probability"
-    elif data["direction"] == "BEARISH":
-        prob_label = "Bearish Probability"
-    else:
-        prob_label = "Neutral Probability"
 
     msg = (
         f"📊 *MACRO PROFILE: {ticker}*\n"
@@ -52,24 +63,28 @@ def generate_telegram_markdown(ticker: str, data: dict) -> str:
         f"🎚️ *Z-Score Boundary:* {data['z_score']:.2f}\n"
         f"🚀 *Momentum Velocity:* {data['momentum_pct']:+.2f}%\n\n"
         f"🤖 *Engine Direction:* {direction_emoji}\n"
-        f"🎯 *{prob_label}:* {data['probability']:.1f}%\n"
-        f"⚡ *Signal Strength:* {data['signal_strength']:.1f}%\n"
+        f"🎯 *Directional Score:* {data['directional_score']:.1f}/100\n"
+        f"⚡ *Signal Strength Rank:* {data['signal_strength']:.1f}%\n"
+        f"🛡️ *System Conviction:* {data.get('conviction', 'LOW')}\n"
     )
     return msg
 
-# 4. Telegram Asynchronous Interactive Command Handlers
+# 4. Telegram Interactive Command Handlers
+async def handle_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Outputs system documentation cleanly."""
+    await update.message.reply_text(generate_help_markdown(), parse_mode="Markdown")
+
 async def handle_bias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Processes asset requests by pulling from the multi-factor analytical engine model."""
+    """Processes asset requests by pulling from the multi-factor analytical model."""
     user_input = " ".join(context.args).upper().strip() if context.args else ""
     
-    # Extract structural route trigger name from raw command handle text fallback
     if not user_input and update.message and update.message.text:
         raw_cmd = update.message.text.split()[0].lower()
         if len(raw_cmd) > 1:
             user_input = raw_cmd[1:].upper()
 
-    if not user_input:
-        await update.message.reply_text("⚠️ Please pass a valid asset ticker. (Example: /gbpusd)")
+    if not user_input or user_input == "BIAS":
+        await update.message.reply_text("⚠️ Please pass a valid asset ticker. (Example: `/bias EURUSD`)", parse_mode="Markdown")
         return
 
     try:
@@ -82,26 +97,32 @@ async def handle_bias_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             formatted_text = generate_telegram_markdown(user_input, metrics)
             await update.message.reply_text(formatted_text, parse_mode="Markdown")
         elif metrics.get("status") == "SKIP" or metrics.get("status") == "ERROR":
-            await update.message.reply_text(f"❌ Core processing fault: {metrics.get('message')}")
+            await update.message.reply_text(f"❌ Processing fault: {metrics.get('message')}")
         else:
-            await update.message.reply_text(f"🔍 Ticker '{user_input}' could not be evaluated by the macro matrix.")
+            await update.message.reply_text(f"🔍 Ticker '{user_input}' could not be resolved by the matrix.")
             
     except Exception as e:
         logger.error(f"Telegram execution exception context: {e}")
         await update.message.reply_text("💥 Internal processor calculation exception occurred.")
 
-# 5. Background Thread Core Polling Loop
+# 5. Dedicated Background Thread Lifecyle Polling Loop
 def run_telegram_bot():
     """Initializes and runs the background bot process using an active event loop."""
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "8891572600:AAFLd6ba9DBj0w8rcrWQqMo6Q6QV8ib727I")
+    # 🛡️ HARDENED SECURITY FIX (Problem #5): Fail immediately if credentials are missing
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not token:
+        critical_error = "CRITICAL RUNTIME ERROR: TELEGRAM_BOT_TOKEN environment variable is missing!"
+        logger.critical(critical_error)
+        raise RuntimeError(critical_error)
     
-    # Allocate a completely independent, dedicated event thread context loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
     app = ApplicationBuilder().token(token).build()
     
-    # Universal routing hooks
+    # Register functional command system hooks
+    app.add_handler(CommandHandler("help", handle_help_command))
+    app.add_handler(CommandHandler("bias", handle_bias_command))
     app.add_handler(CommandHandler("gbpusd", handle_bias_command))
     app.add_handler(CommandHandler("eurusd", handle_bias_command))
     app.add_handler(CommandHandler("eurjpy", handle_bias_command))
@@ -112,9 +133,6 @@ def run_telegram_bot():
     logger.info("🤖 Polling engine fully active. Overriding competing handles...")
     
     loop.run_until_complete(app.initialize())
-    
-    # 🛠️ HARDENED CONNECTION RESOLUTION: Passing drop_pending_updates=True forces 
-    # Telegram to immediately evict the old container process during deploy swaps.
     loop.run_until_complete(app.updater.start_polling(drop_pending_updates=True))
     loop.run_until_complete(app.start())
     
@@ -127,13 +145,11 @@ def run_telegram_bot():
         loop.run_until_complete(app.shutdown())
         loop.close()
 
-# 6. Monitored Main Core Orchestration Block
+# 6. Primary Inception Execution block
 if __name__ == "__main__":
-    # 1. Spin up the background bot daemon thread
     bot_thread = threading.Thread(target=run_telegram_bot, daemon=True)
     bot_thread.start()
     
-    # 2. Spin up the primary Flask thread server web runner 
     port = int(os.environ.get("PORT", 10000))
     logger.info(f"📡 Web routing framework initializing server loop on port: {port}")
     web_app.run(host="0.0.0.0", port=port, debug=False)
