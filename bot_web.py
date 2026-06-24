@@ -35,6 +35,14 @@ def generate_telegram_markdown(ticker: str, data: dict) -> str:
     """Transforms structural raw macro engine profiles into highly polished Telegram copy."""
     direction_emoji = "🟢 BULLISH" if data["direction"] == "BULLISH" else "🔴 BEARISH" if data["direction"] == "BEARISH" else "⚪ NEUTRAL"
     
+    # Dynamic label styling depending on current direction profile
+    if data["direction"] == "BULLISH":
+        prob_label = "Bullish Probability"
+    elif data["direction"] == "BEARISH":
+        prob_label = "Bearish Probability"
+    else:
+        prob_label = "Neutral Probability"
+
     msg = (
         f"📊 *MACRO PROFILE: {ticker}*\n"
         f"📅 _As of: {data['last_update']}_\n"
@@ -44,8 +52,8 @@ def generate_telegram_markdown(ticker: str, data: dict) -> str:
         f"🎚️ *Z-Score Boundary:* {data['z_score']:.2f}\n"
         f"🚀 *Momentum Velocity:* {data['momentum_pct']:+.2f}%\n\n"
         f"🤖 *Engine Direction:* {direction_emoji}\n"
-        f"🎯 *Probability Weight:* {data['probability']:.1f}%\n"
-        f"🛡️ *System Confidence:* {data['confidence']:.1f}%\n"
+        f"🎯 *{prob_label}:* {data['probability']:.1f}%\n"
+        f"⚡ *Signal Strength:* {data['signal_strength']:.1f}%\n"
     )
     return msg
 
@@ -93,23 +101,21 @@ def run_telegram_bot():
     
     app = ApplicationBuilder().token(token).build()
     
-    # Universal fallback route matching pattern to process arbitrary currency profiles
+    # Universal routing hooks
     app.add_handler(CommandHandler("gbpusd", handle_bias_command))
     app.add_handler(CommandHandler("eurusd", handle_bias_command))
     app.add_handler(CommandHandler("eurjpy", handle_bias_command))
     
-    # Catch-all text generic string router for commands not explicitly mapped above
     for asset in ["AUDUSD", "GBPJPY", "CADJPY", "CADCHF", "XAUUSD", "XAGUSD", "BTCUSD", "JP225", "US30"]:
         app.add_handler(CommandHandler(asset.lower(), handle_bias_command))
 
     logger.info("🤖 Polling engine fully active. Overriding competing handles...")
     
-    [span_2](start_span)# Step-by-step lifecycle initialization block[span_2](end_span)
     loop.run_until_complete(app.initialize())
     
-    [span_3](start_span)# HARDENED EXTENSION FIX: Passing drop_pending_updates=True instructs Telegram 
-    # to drop old updates and disconnect the competing container[span_3](end_span).
-    loop.run_until_complete(app.updater.[span_4](start_span)start_polling(drop_pending_updates=True))[span_4](end_span)
+    # 🛠️ HARDENED CONNECTION RESOLUTION: Passing drop_pending_updates=True forces 
+    # Telegram to immediately evict the old container process during deploy swaps.
+    loop.run_until_complete(app.updater.start_polling(drop_pending_updates=True))
     loop.run_until_complete(app.start())
     
     try:
