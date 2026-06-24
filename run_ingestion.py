@@ -1,6 +1,7 @@
 """
 MACRO BIAS ENGINE - Ingestion Pipeline
-Downloads and archives spot assets and cross-market systematic macro anchors.
+Downloads, sanitizes, and logs historical and live market asset prices.
+Hardened with an explicit data audit layer to catch pricing anomalies.
 """
 import sys
 import os
@@ -14,7 +15,6 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from src.database.supabase_client import get_supabase_client
 from src.ingestion.market_prices import fetch_all_prices, FOREX_PAIRS
 
-# Explicitly declare expanded asset-to-ticker mapping internally to ensure safety
 TARGET_REGISTRY = {
     "XAUUSD": ["GC=F", "XAUUSD=X"],
     "XAGUSD": ["SI=F", "XAGUSD=X"],
@@ -28,7 +28,6 @@ TARGET_REGISTRY = {
     "GBPJPY": ["GBPJPY=X"],
     "CADJPY": ["CADJPY=X"],
     "CADCHF": ["CADCHF=X"],
-    # 🏛️ Global Macro Intermarket Pillars
     "DXY": ["DX-Y.NYB"],
     "VIX": ["^VIX"],
     "US10Y": ["^TNX"]
@@ -132,7 +131,7 @@ def run_pipeline():
         
     prices = fetch_all_prices() or {}
     
-    # Manually append macro assets to fetch queue if missing from market_prices output
+    # Fill macro endpoints manually if missing from standard spot price dictionaries
     for display_name, tickers in TARGET_REGISTRY.items():
         if display_name not in prices or prices[display_name] is None:
             for ticker in tickers:
@@ -140,6 +139,25 @@ def run_pipeline():
                 if df is not None and not df.empty:
                     prices[display_name] = df["Close"].iloc[-1]
                     break
+
+    # 🔍 EXPLICIT DATA AUDIT INGESTION CHECK
+    print("\n🔍 EXPLICIT DATA AUDIT INGESTION CHECK:")
+    print("=" * 65)
+    timestamp_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    for name, price in list(prices.items()):
+        print(f"   [AUDIT] Ticker: {name:<8} | Raw Price: {str(price):<10} | Time: {timestamp_now}")
+        
+        # 🪙 HARDENED GOLD SPOT CONTRACT SANITIZATION
+        if name == "XAUUSD" and price is not None:
+            if price > 3500.0:
+                print(f"   ⚠️ WARNING: Abnormal Gold pricing detected ({price}). Normalizing...")
+                if price > 200000:
+                    price = price / 100.0
+                elif price > 20000:
+                    price = price / 10.0
+                prices[name] = price
+                print(f"   ✅ Corrected Gold Price to: {prices[name]}")
+    print("=" * 65)
 
     supabase = get_supabase_client()
     today_string = datetime.now().strftime("%Y-%m-%d")
