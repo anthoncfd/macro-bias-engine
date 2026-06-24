@@ -1,196 +1,99 @@
 """
-MACRO BIAS ENGINE - Ingestion Pipeline
-Downloads, sanitizes, and logs historical and live market asset prices.
-Hardened with an explicit data audit layer to catch pricing anomalies.
+MACRO BIAS ENGINE - Data Ingestion Pipeline
+Fetches live market data, stores it in Supabase using highly efficient bulk operations,
+and triggers real-time computational analytical sequences.
 """
+import logging
 import sys
-import os
-import time
-import requests
-import pandas as pd
 from datetime import datetime
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
 from src.database.supabase_client import get_supabase_client
-from src.ingestion.market_prices import fetch_all_prices
+from src.ingestion.market_prices import fetch_all_prices, ASSETS
+from src.ingestion.macro_data_fetcher import fetch_macro_data
+from src.analytics.bias_engine import calculate_bias_for_asset
 
-TARGET_REGISTRY = {
-    "XAUUSD": ["GC=F", "XAUUSD=X"],
-    "XAGUSD": ["SI=F", "XAGUSD=X"],
-    "BTCUSD": ["BTC-USD"],
-    "JP225": ["^N225"],
-    "US30": ["^DJI"],
-    "EURUSD": ["EURUSD=X"],
-    "GBPUSD": ["GBPUSD=X"],
-    "AUDUSD": ["AUDUSD=X"],
-    "EURJPY": ["EURJPY=X"],
-    "GBPJPY": ["GBPJPY=X"],
-    "CADJPY": ["CADJPY=X"],
-    "CADCHF": ["CADCHF=X"],
-    "DXY": ["DX-Y.NYB"],
-    "VIX": ["^VIX"],
-    "US10Y": ["^TNX"]
-}
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-def fetch_historical_prices(ticker, days_back=35):
-    """Fetches clean historical close sequences using direct Yahoo endpoints."""
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-    params = {"range": f"{days_back}d", "interval": "1d", "includeTimestamps": "true"}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Origin": "https://finance.yahoo.com",
-        "Referer": "https://finance.yahoo.com/"
-    }
-    try:
-        session = requests.Session()
-        session.get("https://finance.yahoo.com", headers=headers, timeout=5)
-        response = session.get(url, headers=headers, params=params, timeout=10)
-        if response.status_code != 200:
-            return None
-        data = response.json()
-        result = data.get("chart", {}).get("result", [None])[0]
-        if not result:
-            return None
-        timestamps = result.get("timestamp", [])
-        closes = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
-        
-        formatted_dates, clean_closes = [], []
-        for ts, cls in zip(timestamps, closes):
-            if ts is None or cls is None:
-                continue
-            formatted_dates.append(datetime.fromtimestamp(ts).strftime("%Y-%m-%d"))
-            clean_closes.append(float(cls))
-        return pd.DataFrame({"Date": formatted_dates, "Close": clean_closes})
-    except Exception:
-        return None
+ALL_TICKERS = list(ASSETS.keys()) + ["DXY", "VIX", "US10Y"]
+TARGET_ANALYTICS_ASSETS = list(ASSETS.keys())
 
-def run_backfill(days_back=35):
-    """Backfills history to satisfy technical indicators requiring historical depth."""
-    print(f"\n📥 Forcing {days_back}-day structural historical backfill...")
+def process_pipeline_ingestion():
+    """
+    Runs the primary lifecycle: fetches live data, handles batched inserts,
+    and pipes real-time prices directly into dynamic bias calculations.
+    """
+    logger.info("🚀 INITIALIZING INGESTION PIPELINE RUN")
     supabase = get_supabase_client()
-    total_inserted = 0
     
-    for display_name, tickers in TARGET_REGISTRY.items():
-        df = None
-        for ticker in tickers:
-            df = fetch_historical_prices(ticker, days_back=days_back)
-            if df is not None and not df.empty:
-                break
-            time.sleep(0.5)
-            
-        if df is None or df.empty:
-            continue
-            
-        for _, row in df.iterrows():
-            date_str = row["Date"]
-            price = row["Close"]
-            if pd.isna(price):
-                continue
-                
-            # Sanitize backfill inputs using the same strict quant boundaries
-            if display_name == "XAUUSD" and price > 3500.0:
-                price = price / 1.734
-            if display_name == "XAGUSD" and price > 45.0:
-                price = price / 1.95
-
-            check = supabase.table("market_structure_logs") \
-                .select("id").eq("ticker", display_name).eq("created_at", date_str).execute()
-            if check.data:
-                continue
-                
-            row_data = {
-                "ticker": display_name,
-                "latest_close": float(price),
-                "trend": "NEUTRAL",
-                "momentum_score": 0.0,
-                "created_at": date_str
-            }
-            try:
-                supabase.table("market_structure_logs").insert(row_data).execute()
-                total_inserted += 1
-            except Exception:
-                pass
-    print(f"✅ Historical matrix synchronizer complete. Rows added: {total_inserted}")
-
-def get_row_count():
+    # Enforce precise ISO 8601 timestamps with explicit UTC timezone offsets
+    timestamp_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    
     try:
-        supabase = get_supabase_client()
-        res = supabase.table("market_structure_logs").select("created_at").limit(100).execute()
-        return len({r['created_at'].split('T')[0] for r in res.data}) if res.data else 0
-    except Exception:
-        return 0
-
-def run_pipeline():
-    """Main execution pipeline runner."""
-    print("🚀 INITIALIZING INTEL INGESTION PIPELINE RUN")
-    
-    row_count = get_row_count()
-    if row_count < 20:
-        run_backfill(days_back=35)
+        logger.info("📊 Fetching live market data arrays...")
+        prices = fetch_all_prices()
+        macro_data = fetch_macro_data()
         
-    prices = fetch_all_prices() or {}
-    
-    for display_name, tickers in TARGET_REGISTRY.items():
-        if display_name not in prices or prices[display_name] is None:
-            for ticker in tickers:
-                df = fetch_historical_prices(ticker, days_back=2)
-                if df is not None and not df.empty:
-                    prices[display_name] = df["Close"].iloc[-1]
-                    break
+        market_data = {**prices, **macro_data}
+        market_data["DXY"] = macro_data.get("dxy")
+        market_data["VIX"] = macro_data.get("vix")
+        market_data["US10Y"] = macro_data.get("us10y")
+        
+        logger.info("✅ Market data fetched successfully from remote endpoints")
+    except Exception as api_err:
+        logger.error(f"❌ Failed to fetch upstream data: {api_err}")
+        sys.exit(1)
 
-    # 🔍 EXPLICIT DATA AUDIT INGESTION CHECK
     print("\n🔍 EXPLICIT DATA AUDIT INGESTION CHECK:")
-    print("=" * 65)
-    timestamp_now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    for name, price in list(prices.items()):
-        print(f"   [AUDIT] Ticker: {name:<8} | Raw Price: {str(price):<10} | Time: {timestamp_now}")
-        
-        # 🪙 HARDENED PRECIOUS METALS CONVERSION SANITIZER
-        if name == "XAUUSD" and price is not None:
-            if price > 3500.0:
-                print(f"   ⚠️ WARNING: Abnormal Gold pricing detected ({price}). Normalizing to Spot baseline...")
-                prices[name] = price / 1.734
-                print(f"   ✅ Corrected Gold Price to: {prices[name]:.4f}")
-                
-        if name == "XAGUSD" and price is not None:
-            if price > 45.0:
-                print(f"   ⚠️ WARNING: Abnormal Silver pricing detected ({price}). Normalizing to Spot baseline...")
-                prices[name] = price / 1.95
-                print(f"   ✅ Corrected Silver Price to: {prices[name]:.4f}")
-    print("=" * 65)
-
-    supabase = get_supabase_client()
-    today_string = datetime.now().strftime("%Y-%m-%d")
+    print("=" * 60)
     
-    for name, price in prices.items():
-        if price is None or name not in TARGET_REGISTRY:
+    insert_batch = []
+    for ticker in ALL_TICKERS:
+        price = market_data.get(ticker)
+        if price is None:
+            logger.warning(f"⚠️ Ticker {ticker} missing from active payload feed.")
             continue
             
-        dup = supabase.table("market_structure_logs") \
-            .select("id").eq("ticker", name).eq("created_at", today_string).execute()
-        if dup.data:
-            continue
-            
-        row = {
-            "ticker": name,
-            "latest_close": float(price),
+        raw_price = float(price)
+        print(f"   [AUDIT] Ticker: {ticker:<8} | Raw Price: {raw_price:<18} | Time: {timestamp_iso[:19]}")
+        
+        insert_batch.append({
+            "ticker": ticker,
+            "latest_close": raw_price,
             "trend": "NEUTRAL",
             "momentum_score": 0.0,
-            "created_at": today_string
-        }
-        try:
-            supabase.table("market_structure_logs").insert(row).execute()
-        except Exception as e:
-            print(f"❌ Ingestion database sync failed for {name}: {e}")
+            "created_at": timestamp_iso
+        })
 
-    print("🧠 BOOTING COGNITIVE EVALUATION LAYER")
-    try:
-        from src.analytics.bias_engine import run_bias_engine
-        run_bias_engine()
-        print("✅ COGNITIVE EVALUATION COMPLETE - PREDICTIONS RECONCILED")
-    except Exception as e:
-        print(f"❌ Computation step execution fault: {e}")
+    if insert_batch:
+        try:
+            supabase.table("market_structure_logs").insert(insert_batch).execute()
+            logger.info(f"✅ Bulk committed {len(insert_batch)} historical matrix rows to Supabase.")
+        except Exception as db_err:
+            logger.error(f"❌ Critical database pipeline insertion failure: {db_err}")
+            sys.exit(1)
+    
+    print("=" * 60 + "\n")
+    
+    logger.info("🧠 RUNNING QUANTITATIVE BIAS ENGINE MATRIX")
+    success_count = 0
+    
+    for ticker in TARGET_ANALYTICS_ASSETS:
+        live_price_override = market_data.get(ticker)
+        
+        # Ingestion passes live pricing floats directly to execution calculations
+        metrics = calculate_bias_for_asset(ticker, live_price_override=live_price_override)
+        
+        if metrics.get("status") == "SUCCESS":
+            success_count += 1
+            logger.info(f"   📊 Unified profile parsed for {ticker:<6} | Score: {metrics['directional_score']:.1f}/100")
+        else:
+            logger.error(f"   ❌ Analytics computation error for {ticker}: {metrics.get('message')}")
+
+    logger.info(f"🏁 INGESTION PIPELINE COMPLETE | Successfully calculated {success_count} biases.")
 
 if __name__ == "__main__":
-    run_pipeline()
+    process_pipeline_ingestion()
