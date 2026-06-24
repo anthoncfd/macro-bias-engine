@@ -1,6 +1,7 @@
 """
 MACRO BIAS ENGINE - Quantitative Bias Engine (V2.1)
 Calculates Z-scores, momentum, and directional biases from historical data.
+Employs robust mixed-mode ISO timestamp parsing logic.
 """
 import os
 import sys
@@ -20,7 +21,7 @@ SMA_WINDOW = 20
 MIN_DATA_POINTS = 10
 
 def fetch_asset_history(display_name):
-    """Fetch historical data from Supabase using the display name."""
+    """Fetch historical records from Supabase and parse mixed timestamp arrays safely."""
     print(f"   📥 Fetching history for {display_name}...")
     try:
         supabase = get_supabase_client()
@@ -32,20 +33,24 @@ def fetch_asset_history(display_name):
             .execute()
         
         if not response.data:
-            print(f"   ⚠️ No data for {display_name}")
+            print(f"   ⚠️ No historical data array found for {display_name}")
             return pd.DataFrame()
         
         df = pd.DataFrame(response.data)
-        df['created_at'] = pd.to_datetime(df['created_at'])
+        
+        # 🔧 FIX: Hand off string conversion tasks to the flexible mixed ISO parser engine
+        df['created_at'] = pd.to_datetime(df['created_at'], format='mixed', utc=True)
+        
+        # Sort data to build traditional chronological asset dataframes
         df = df.sort_values('created_at').reset_index(drop=True)
         print(f"   ✅ Found {len(df)} rows for {display_name}")
         return df
     except Exception as e:
-        print(f"   ❌ Error fetching {display_name}: {e}")
+        print(f"   ❌ Error fetching time series for {display_name}: {e}")
         return pd.DataFrame()
 
 def calculate_bias_for_asset(display_name):
-    """Calculates bias metrics for a single asset."""
+    """Calculates rolling quantitative momentum and directional trading biases."""
     df = fetch_asset_history(display_name)
     
     if len(df) < MIN_DATA_POINTS:
@@ -56,6 +61,7 @@ def calculate_bias_for_asset(display_name):
             "message": f"Need {MIN_DATA_POINTS} instances, found {len(df)}"
         }
     
+    # Cap window size to data depth during cold starts or backfill transitions
     window = min(SMA_WINDOW, len(df))
     df['sma'] = df['latest_close'].rolling(window=window).mean()
     df['std'] = df['latest_close'].rolling(window=window).std()
@@ -64,10 +70,12 @@ def calculate_bias_for_asset(display_name):
     latest_sma = float(df['sma'].iloc[-1])
     latest_std = float(df['std'].iloc[-1])
     
+    # Avoid mathematical division errors if market variance drops to absolute zero
     z_score = (latest_close - latest_sma) / latest_std if latest_std and latest_std > 0 else 0.0
     prev_close = float(df['latest_close'].iloc[-2]) if len(df) > 1 else latest_close
     momentum_pct = ((latest_close - prev_close) / prev_close) * 100
     
+    # Derive structural tracking directions
     if latest_close > latest_sma and z_score > 0.3:
         direction = "BULLISH"
     elif latest_close < latest_sma and z_score < -0.3:
@@ -75,6 +83,7 @@ def calculate_bias_for_asset(display_name):
     else:
         direction = "NEUTRAL"
     
+    # Project score metrics into bounded probability representations
     raw_prob = 0.5 + (z_score * 0.15)
     probability = max(5.0, min(95.0, raw_prob * 100))
     confidence_base = 0.7 + (0.3 * min(1.0, abs(z_score) / 3.0))
@@ -95,7 +104,7 @@ def calculate_bias_for_asset(display_name):
     }
 
 def run_bias_engine():
-    """Runs the bias engine for all assets."""
+    """Loops through asset definitions to run evaluation profiles."""
     print("=" * 60)
     print("🧠 MACRO BIAS ENGINE - QUANTITATIVE ANALYSIS")
     print(f"📅 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
