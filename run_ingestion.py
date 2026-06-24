@@ -1,6 +1,7 @@
 """
 MACRO BIAS ENGINE - Main Ingestion Pipeline
-Auto-backfills if database is empty, then runs daily ingestion.
+Auto-backfills if database has less than 10 days of clean data.
+Handles explicit date tracking to eliminate microsecond timezone pollution.
 """
 import sys
 import os
@@ -15,7 +16,7 @@ from src.database.supabase_client import get_supabase_client
 from src.ingestion.market_prices import fetch_all_prices, FOREX_PAIRS, ASSETS
 
 def run_backfill(days_back=10):
-    """Backfill historical data into Supabase."""
+    """Backfill clean historical daily close data into Supabase."""
     print(f"\n📥 BACKFILLING {days_back} days of historical data...")
     print("=" * 55)
     
@@ -40,8 +41,7 @@ def run_backfill(days_back=10):
                 if not df.empty:
                     print(f"   ✅ Using ticker: {ticker}")
                     break
-            except Exception as e:
-                print(f"   ⚠️ Ticker {ticker} failed: {e}")
+            except:
                 continue
         
         if df is None or df.empty:
@@ -60,11 +60,13 @@ def run_backfill(days_back=10):
             if pd.isna(price):
                 continue
             
-            # Check if this date already exists
+            # Format explicitly to YYYY-MM-DD string to override database automated timestamp values
+            formatted_date = date_idx.strftime("%Y-%m-%d")
+            
             check = supabase.table("market_structure_logs") \
                 .select("id") \
                 .eq("ticker", display_name) \
-                .eq("created_at", date_idx.strftime("%Y-%m-%d")) \
+                .eq("created_at", formatted_date) \
                 .execute()
             
             if check.data:
@@ -75,49 +77,62 @@ def run_backfill(days_back=10):
                 "latest_close": price,
                 "trend": "NEUTRAL",
                 "momentum_score": 0.0,
-                "created_at": date_idx.strftime("%Y-%m-%d")
+                "created_at": formatted_date
             }
             
             try:
                 supabase.table("market_structure_logs").insert(row_data).execute()
                 total_inserted += 1
-                print(f"   📅 {date_idx.strftime('%Y-%m-%d')}: {price}")
-            except Exception as e:
-                print(f"   ❌ Insert failed: {e}")
-            
+                print(f"   📅 {formatted_date}: {price}")
+            except:
+                pass
             time.sleep(0.05)
         time.sleep(0.3)
     
     print(f"\n✅ Backfill complete! Inserted {total_inserted} rows.")
     return total_inserted
 
-def is_database_empty():
-    """Check if market_structure_logs has any data."""
+def get_row_count():
+    """Get number of distinct daily entries in market_structure_logs."""
     try:
         supabase = get_supabase_client()
-        result = supabase.table("market_structure_logs").select("id").limit(1).execute()
-        return len(result.data) == 0
+        result = supabase.table("market_structure_logs") \
+            .select("created_at") \
+            .order("created_at", desc=True) \
+            .limit(100) \
+            .execute()
+        
+        if not result.data:
+            return 0
+            
+        # Parse cleanly using split to isolate core calendar date boundaries
+        dates = {row['created_at'].split('T')[0] for row in result.data}
+        return len(dates)
     except Exception as e:
-        print(f"   ⚠️ Database check failed: {e}")
-        return True  # Assume empty on error
+        print(f"   ⚠️ Row count check failed: {e}")
+        return 0
 
 def run_pipeline():
-    """Executes the full ingestion pipeline, auto-backfilling if needed."""
+    """Executes the full ingestion pipeline, maintaining strict daily data synchronization."""
     print("=" * 55)
     print("🚀 MACRO BIAS ENGINE - INGESTION PIPELINE")
     print(f"📅 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 55)
 
-    # --- Auto-backfill if database is empty ---
-    print("\n🔍 Checking database for existing data...")
-    if is_database_empty():
-        print("\n⚠️ Database is empty. Running automatic backfill (10 days)...")
-        run_backfill(days_back=10)
-        print("\n✅ Backfill complete. Continuing with normal ingestion...")
-    else:
-        print("\n✅ Database has existing data. Skipping backfill.")
+    # --- Verify distinct data logs exist ---
+    print("\n🔍 Checking database for sufficient historical depth...")
+    row_count = get_row_count()
+    print(f"   📊 Found {row_count} distinct daily points in database")
 
-    # --- Normal daily ingestion ---
+    if row_count < 10:
+        days_needed = 10 - row_count
+        print(f"\n⚠️ Only {row_count} days of data. Backfilling {days_needed + 5} more days...")
+        run_backfill(days_back=days_needed + 5)
+        print("\n✅ Backfill complete. Continuing with daily ingestion processing...")
+    else:
+        print("\n✅ Database has sufficient history. Skipping backfill tracking.")
+
+    # --- Daily close ingestion processing ---
     print("\n⏳ Waiting 3 seconds...")
     time.sleep(3)
 
@@ -143,14 +158,31 @@ def run_pipeline():
 
     print("\n📤 Syncing logs to 'market_structure_logs'...")
     inserted_count = 0
+    
+    # Freeze current date to isolate multi-asset ticks to a uniform trading date index
+    today_string = datetime.now().strftime("%Y-%m-%d")
+    
     for name, price in prices.items():
         if price is None:
             continue
+            
+        # Same-day deduplication check: prevents duplicate rows on multi-run days
+        dup_check = supabase.table("market_structure_logs") \
+            .select("id") \
+            .eq("ticker", name) \
+            .eq("created_at", today_string) \
+            .execute()
+            
+        if dup_check.data:
+            print(f"   ⚪ {name} already recorded for today ({today_string}). Skipping insert.")
+            continue
+
         row = {
             "ticker": name,
             "latest_close": float(price),
             "trend": "NEUTRAL",
-            "momentum_score": 0.0
+            "momentum_score": 0.0,
+            "created_at": today_string  # Forces standard string mapping over default server timestamps
         }
         try:
             supabase.table("market_structure_logs").insert(row).execute()
@@ -169,7 +201,7 @@ def run_pipeline():
         from src.analytics.bias_engine import run_bias_engine
         run_bias_engine()
     except Exception as e:
-        print(f"❌ Bias Engine failed: {e}")
+        print(f"❌ Bias Engine execution crash: {e}")
 
     print("\n" + "=" * 55)
     print("✅ PIPELINE COMPLETE")
