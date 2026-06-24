@@ -1,128 +1,121 @@
 """
-MACRO BIAS ENGINE - Quantitative Bias Engine (V2.1)
-Calculates Z-scores, momentum, and directional biases from historical data.
-Employs robust mixed-mode ISO timestamp parsing logic.
+MACRO BIAS ENGINE - Analytical Processing Core
+Refactored to eliminate metric logic flaws and introduce a multi-factor macro framework.
 """
-import os
-import sys
-import pandas as pd
 import numpy as np
+import pandas as pd
 from datetime import datetime
-
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-if BASE_DIR not in sys.path:
-    sys.path.append(BASE_DIR)
-
 from src.database.supabase_client import get_supabase_client
-from src.ingestion.market_prices import ASSETS, FOREX_PAIRS
 
-HISTORY_DAYS = 60
-SMA_WINDOW = 20
-MIN_DATA_POINTS = 10
-
-def fetch_asset_history(display_name):
-    """Fetch historical records from Supabase and parse mixed timestamp arrays safely."""
-    print(f"   📥 Fetching history for {display_name}...")
+def calculate_bias_for_asset(ticker):
+    """
+    Evaluates multi-factor structural directional profiles for a target asset.
+    Cross-references localized metrics against global macro regime anchors (DXY, VIX, US10Y).
+    """
     try:
-        supabase = get_supabase_client()
-        response = supabase.table("market_structure_logs") \
-            .select("latest_close", "created_at") \
-            .eq("ticker", display_name) \
-            .order("created_at", desc=True) \
-            .limit(HISTORY_DAYS) \
-            .execute()
-        
-        if not response.data:
-            print(f"   ⚠️ No historical data array found for {display_name}")
-            return pd.DataFrame()
-        
-        df = pd.DataFrame(response.data)
-        
-        # 🔧 FIX: Hand off string conversion tasks to the flexible mixed ISO parser engine
-        df['created_at'] = pd.to_datetime(df['created_at'], format='mixed', utc=True)
-        
-        # Sort data to build traditional chronological asset dataframes
-        df = df.sort_values('created_at').reset_index(drop=True)
-        print(f"   ✅ Found {len(df)} rows for {display_name}")
-        return df
-    except Exception as e:
-        print(f"   ❌ Error fetching time series for {display_name}: {e}")
-        return pd.DataFrame()
+        # Macro indicators are input drivers, not assets themselves
+        if ticker in ["DXY", "VIX", "US10Y"]:
+            return {"status": "SKIP", "message": "Systemic benchmark anchor asset."}
 
-def calculate_bias_for_asset(display_name):
-    """Calculates rolling quantitative momentum and directional trading biases."""
-    df = fetch_asset_history(display_name)
-    
-    if len(df) < MIN_DATA_POINTS:
+        supabase = get_supabase_client()
+
+        # 1. Gather Historical Target Sequence Arrays
+        res = supabase.table("market_structure_logs") \
+            .select("*").eq("ticker", ticker).order("created_at", desc=True).limit(35).execute()
+            
+        if not res.data or len(res.data) < 20:
+            return {"status": "ERROR", "message": f"Insufficient historical tracking row sample ({len(res.data) if res.data else 0}/20)."}
+
+        df = pd.DataFrame(res.data).iloc[::-1].reset_index(drop=True)
+        prices = df["latest_close"].astype(float).values
+        
+        current_price = prices[-1]
+        sma_20 = np.mean(prices[-20:])
+        std_20 = np.std(prices[-20:])
+        z_score = (current_price - sma_20) / std_20 if std_20 > 0 else 0.0
+        momentum_pct = ((prices[-1] - prices[-2]) / prices[-2]) * 100
+
+        # 2. Extract Cross-Asset Macro Variables
+        macro_anchors = ["DXY", "VIX", "US10Y"]
+        macro_states = {}
+        
+        for m_ticker in macro_anchors:
+            m_res = supabase.table("market_structure_logs") \
+                .select("latest_close").eq("ticker", m_ticker).order("created_at", desc=True).limit(2).execute()
+            if m_res.data and len(m_res.data) >= 2:
+                macro_states[m_ticker] = "RISING" if float(m_res.data[0]["latest_close"]) > float(m_res.data[1]["latest_close"]) else "FALLING"
+            else:
+                macro_states[m_ticker] = "NEUTRAL"
+
+        # 3. Intermarket Scoring Architecture Matrix
+        # +1 weights Bullish bias, -1 weights Bearish bias
+        confluence_votes = []
+
+        # Feature Set A: Local Structural Position
+        confluence_votes.append(1 if current_price > sma_20 else -1)
+        confluence_votes.append(1 if momentum_pct > 0 else -1)
+        
+        # Feature Set B: Global DXY Liquid Currency Regime
+        if macro_states.get("DXY") == "RISING":
+            # Stronger dollar pressures foreign FX pairs and precious metals
+            confluence_votes.append(-1 if ticker in ["EURUSD", "GBPUSD", "AUDUSD", "XAUUSD", "XAGUSD", "BTCUSD"] else 1)
+        else:
+            confluence_votes.append(1 if ticker in ["EURUSD", "GBPUSD", "AUDUSD", "XAUUSD", "XAGUSD", "BTCUSD"] else -1)
+
+        # Feature Set C: Volatility Safe-Haven Regime
+        if macro_states.get("VIX") == "RISING":
+            # High risk off environment drops high-beta equities and crypto assets
+            confluence_votes.append(-1 if ticker in ["US30", "JP225", "BTCUSD"] else 1)
+        else:
+            confluence_votes.append(1 if ticker in ["US30", "JP225", "BTCUSD"] else -1)
+
+        # Feature Set D: Treasury Rate Divergence Matrix
+        if macro_states.get("US10Y") == "RISING":
+            # Higher yields increase cost of carry, undermining non-yielding assets
+            confluence_votes.append(-1 if ticker in ["XAUUSD", "BTCUSD"] else 0)
+
+        # 4. Calibrate Coherent Math Profiles (Resolves logical contradictions)
+        total_votes = len([v for v in confluence_votes if v != 0])
+        bullish_count = sum(1 for v in confluence_votes if v == 1)
+        bearish_count = sum(1 for v in confluence_votes if v == -1)
+        
+        if bullish_count > bearish_count:
+            direction = "BULLISH"
+            probability = (bullish_count / total_votes) * 100
+        elif bearish_count > bullish_count:
+            direction = "BEARISH"
+            probability = (bearish_count / total_votes) * 100
+        else:
+            direction = "NEUTRAL"
+            probability = 50.0
+
+        # Confidence Calculation: Quantifies structural stability vs tail risk extension.
+        # Highly extended boundaries lower confidence to flag trend exhaustion risks.
+        max_normal_deviation = 2.5
+        volatility_extension = min(abs(z_score) / max_normal_deviation, 1.0)
+        confidence = (1.0 - (volatility_extension * 0.35)) * 100
+
         return {
-            "ticker": display_name,
-            "status": "INSUFFICIENT_DATA",
-            "data_points": len(df),
-            "message": f"Need {MIN_DATA_POINTS} instances, found {len(df)}"
+            "status": "SUCCESS",
+            "ticker": ticker,
+            "latest_close": current_price,
+            "sma_20": sma_20,
+            "z_score": z_score,
+            "momentum_pct": momentum_pct,
+            "direction": direction,
+            "probability": probability,   # Confluence Factor Agreement %
+            "confidence": confidence,     # Trend Structural Stability %
+            "last_update": df["created_at"].iloc[-1]
         }
-    
-    # Cap window size to data depth during cold starts or backfill transitions
-    window = min(SMA_WINDOW, len(df))
-    df['sma'] = df['latest_close'].rolling(window=window).mean()
-    df['std'] = df['latest_close'].rolling(window=window).std()
-    
-    latest_close = float(df['latest_close'].iloc[-1])
-    latest_sma = float(df['sma'].iloc[-1])
-    latest_std = float(df['std'].iloc[-1])
-    
-    # Avoid mathematical division errors if market variance drops to absolute zero
-    z_score = (latest_close - latest_sma) / latest_std if latest_std and latest_std > 0 else 0.0
-    prev_close = float(df['latest_close'].iloc[-2]) if len(df) > 1 else latest_close
-    momentum_pct = ((latest_close - prev_close) / prev_close) * 100
-    
-    # Derive structural tracking directions
-    if latest_close > latest_sma and z_score > 0.3:
-        direction = "BULLISH"
-    elif latest_close < latest_sma and z_score < -0.3:
-        direction = "BEARISH"
-    else:
-        direction = "NEUTRAL"
-    
-    # Project score metrics into bounded probability representations
-    raw_prob = 0.5 + (z_score * 0.15)
-    probability = max(5.0, min(95.0, raw_prob * 100))
-    confidence_base = 0.7 + (0.3 * min(1.0, abs(z_score) / 3.0))
-    confidence = min(95.0, confidence_base * 100)
-    
-    return {
-        "ticker": display_name,
-        "status": "SUCCESS",
-        "data_points": len(df),
-        "latest_close": latest_close,
-        "sma_20": latest_sma,
-        "z_score": round(z_score, 2),
-        "momentum_pct": round(momentum_pct, 2),
-        "direction": direction,
-        "probability": round(probability, 1),
-        "confidence": round(confidence, 1),
-        "last_update": df['created_at'].iloc[-1].strftime('%Y-%m-%d %H:%M:%S')
-    }
+    except Exception as e:
+        return {"status": "CRASH", "message": str(e)}
 
 def run_bias_engine():
-    """Loops through asset definitions to run evaluation profiles."""
-    print("=" * 60)
-    print("🧠 MACRO BIAS ENGINE - QUANTITATIVE ANALYSIS")
-    print(f"📅 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 60)
-    
+    """Orchestrates computational engine maps over all valid active assets."""
+    from src.ingestion.market_prices import ASSETS
     results = {}
-    for display_name in ASSETS.keys():
-        result = calculate_bias_for_asset(display_name)
-        results[display_name] = result
-        
-        if result.get("status") == "SUCCESS":
-            price_str = f"{result['latest_close']:.4f}" if display_name in FOREX_PAIRS else f"${result['latest_close']:,.2f}"
-            print(f"{display_name:8} | Price: {price_str:12} | {result['direction']:8} | Prob: {result['probability']:5.1f}% | Conf: {result['confidence']:5.1f}%")
-        else:
-            print(f"{display_name:8} | ❌ {result.get('message', 'No data')}")
-    
-    print("=" * 60)
+    for ticker in ASSETS.keys():
+        metrics = calculate_bias_for_asset(ticker)
+        if metrics.get("status") == "SUCCESS":
+            results[ticker] = metrics
     return results
-
-if __name__ == "__main__":
-    run_bias_engine()
