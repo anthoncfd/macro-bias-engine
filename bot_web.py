@@ -13,7 +13,6 @@ from datetime import datetime
 from flask import Flask
 from telegram.ext import Application, CommandHandler
 
-# Add repo root to path
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 if REPO_ROOT not in sys.path:
     sys.path.append(REPO_ROOT)
@@ -24,7 +23,6 @@ from src.database.supabase_client import get_supabase_client
 from src.ingestion.market_prices import FOREX_PAIRS
 from src.ingestion.macro_data_fetcher import fetch_macro_data
 
-# --- Configuration ---
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     logging.error("❌ TELEGRAM_BOT_TOKEN not set.")
@@ -143,7 +141,6 @@ async def full_bias_matrix(update, context):
     
     report += "──────────────────────────\n"
     
-    # Dynamic dashboard: show validation when enough data
     if audit_report.get("status") == "Active Validation":
         report += "📈 *LIVE VALIDATION*\n"
         report += f"   • Samples: `{audit_report['sample_size']}`\n"
