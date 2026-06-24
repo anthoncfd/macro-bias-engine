@@ -1,7 +1,6 @@
 """
 MACRO BIAS ENGINE - Main Ingestion Pipeline
-Orchestrates fetching data, inserting it into Supabase, and running the Bias Engine.
-Supports backfill via BACKFILL_DAYS environment variable.
+Auto-backfills if database is empty, then runs daily ingestion.
 """
 import sys
 import os
@@ -30,11 +29,19 @@ def run_backfill(days_back=10):
         df = None
         for ticker in tickers:
             try:
-                df = yf.download(ticker, start=start_date.strftime("%Y-%m-%d"), end=end_date.strftime("%Y-%m-%d"), interval="1d", progress=False, auto_adjust=True)
+                df = yf.download(
+                    ticker,
+                    start=start_date.strftime("%Y-%m-%d"),
+                    end=end_date.strftime("%Y-%m-%d"),
+                    interval="1d",
+                    progress=False,
+                    auto_adjust=True
+                )
                 if not df.empty:
                     print(f"   ✅ Using ticker: {ticker}")
                     break
-            except:
+            except Exception as e:
+                print(f"   ⚠️ Ticker {ticker} failed: {e}")
                 continue
         
         if df is None or df.empty:
@@ -53,7 +60,13 @@ def run_backfill(days_back=10):
             if pd.isna(price):
                 continue
             
-            check = supabase.table("market_structure_logs").select("id").eq("ticker", display_name).eq("created_at", date_idx.strftime("%Y-%m-%d")).execute()
+            # Check if this date already exists
+            check = supabase.table("market_structure_logs") \
+                .select("id") \
+                .eq("ticker", display_name) \
+                .eq("created_at", date_idx.strftime("%Y-%m-%d")) \
+                .execute()
+            
             if check.data:
                 continue
             
@@ -69,27 +82,42 @@ def run_backfill(days_back=10):
                 supabase.table("market_structure_logs").insert(row_data).execute()
                 total_inserted += 1
                 print(f"   📅 {date_idx.strftime('%Y-%m-%d')}: {price}")
-            except:
-                pass
+            except Exception as e:
+                print(f"   ❌ Insert failed: {e}")
+            
             time.sleep(0.05)
         time.sleep(0.3)
     
     print(f"\n✅ Backfill complete! Inserted {total_inserted} rows.")
     return total_inserted
 
+def is_database_empty():
+    """Check if market_structure_logs has any data."""
+    try:
+        supabase = get_supabase_client()
+        result = supabase.table("market_structure_logs").select("id").limit(1).execute()
+        return len(result.data) == 0
+    except Exception as e:
+        print(f"   ⚠️ Database check failed: {e}")
+        return True  # Assume empty on error
+
 def run_pipeline():
-    """Executes the full ingestion pipeline."""
+    """Executes the full ingestion pipeline, auto-backfilling if needed."""
     print("=" * 55)
     print("🚀 MACRO BIAS ENGINE - INGESTION PIPELINE")
     print(f"📅 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 55)
 
-    backfill_days = int(os.environ.get("BACKFILL_DAYS", "0"))
-    if backfill_days > 0:
-        run_backfill(backfill_days)
-        print("\n✅ Backfill complete! Exiting.")
-        return
+    # --- Auto-backfill if database is empty ---
+    print("\n🔍 Checking database for existing data...")
+    if is_database_empty():
+        print("\n⚠️ Database is empty. Running automatic backfill (10 days)...")
+        run_backfill(days_back=10)
+        print("\n✅ Backfill complete. Continuing with normal ingestion...")
+    else:
+        print("\n✅ Database has existing data. Skipping backfill.")
 
+    # --- Normal daily ingestion ---
     print("\n⏳ Waiting 3 seconds...")
     time.sleep(3)
 
@@ -118,7 +146,12 @@ def run_pipeline():
     for name, price in prices.items():
         if price is None:
             continue
-        row = {"ticker": name, "latest_close": float(price), "trend": "NEUTRAL", "momentum_score": 0.0}
+        row = {
+            "ticker": name,
+            "latest_close": float(price),
+            "trend": "NEUTRAL",
+            "momentum_score": 0.0
+        }
         try:
             supabase.table("market_structure_logs").insert(row).execute()
             print(f"   ✅ Inserted {name}")
