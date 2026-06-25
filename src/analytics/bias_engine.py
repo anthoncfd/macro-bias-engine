@@ -92,15 +92,14 @@ def calculate_bias_for_asset(ticker, live_price_override=None):
             else:
                 conviction_rating = "LOW"
 
-        # 8. Record Outputs to Central Database Using Exact Database Column Schema Mapping
+        # 8. Record Outputs to Central Database Using Exact Verified Schema Mapping
         created_date_key = datetime_to_date_key()
         prediction_record = {
             "ticker": ticker,
             "created_date_key": created_date_key,
-            "momentum_score": round(calculated_score, 2),  # Fixed target schema map name
+            "momentum_score": round(calculated_score, 2),
             "trend": trend_signal,
-            "conviction": conviction_rating,
-            "latest_close": current_price
+            "conviction": conviction_rating
         }
 
         # Safe upsert mapping using table primary key constraints
@@ -109,7 +108,7 @@ def calculate_bias_for_asset(ticker, live_price_override=None):
             on_conflict="ticker,created_date_key"
         ).execute()
 
-        # Return layout back to run_ingestion pipeline tracker
+        # Return layout back to run_ingestion pipeline log output
         return {
             "status": "SUCCESS",
             "ticker": ticker,
