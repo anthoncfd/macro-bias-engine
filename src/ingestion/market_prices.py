@@ -1,7 +1,7 @@
 """
 MACRO BIAS ENGINE - Market Data Fetcher
 Gold & Silver: ONLY use GoldPrice.Today (spot) – NO YAHOO, NO FUTURES.
-All other assets: use Yahoo Finance (spot tickers only, no futures fallback).
+All other assets: use Yahoo Finance (spot tickers only).
 """
 import requests
 import time
