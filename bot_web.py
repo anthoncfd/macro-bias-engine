@@ -1,11 +1,11 @@
 """
-MACRO BIAS ENGINE - Telegram Bot (Fixed Signal Handler Issue)
+MACRO BIAS ENGINE - Telegram Bot (Main Thread)
+Flask runs in background thread to keep Render alive.
 """
 import os
 import sys
 import logging
 import threading
-import asyncio
 import time
 from flask import Flask, jsonify
 from telegram import Update
@@ -143,36 +143,34 @@ async def matrix(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"❌ Matrix error: {e}", exc_info=True)
 
-# ─── Bot Runner ─────────────────────────────────────────────────────────
-def run_bot():
-    logger.info("🚀 Starting Telegram bot thread...")
-    try:
-        app = Application.builder().token(TOKEN).build()
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("help", start))
-        app.add_handler(CommandHandler("ping", ping_cmd))
-        app.add_handler(CommandHandler("bias", matrix))
-        if ASSETS:
-            for a in ASSETS.keys():
-                app.add_handler(CommandHandler(a.lower(), asset_handler))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, asset_handler))
-        app.add_handler(MessageHandler(filters.COMMAND, asset_handler))
-
-        logger.info("🤖 Bot starting poller (signal_handlers=False)...")
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        # 🔥 CRITICAL FIX: disable signal handlers to avoid thread error
-        loop.run_until_complete(app.run_polling(signal_handlers=False))
-    except Exception as e:
-        logger.error(f"💥 Bot crashed: {e}", exc_info=True)
-
-# ─── Main ────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    # Start bot in background thread
-    t = threading.Thread(target=run_bot, daemon=True)
-    t.start()
-    logger.info("🔄 Bot thread started, waiting 5s...")
-    time.sleep(5)
+# ─── Flask runner (background thread) ────────────────────────────────
+def run_flask():
     port = int(os.environ.get("PORT", 10000))
     logger.info(f"🚀 Flask starting on port {port}")
     flask_app.run(host="0.0.0.0", port=port)
+
+# ─── Bot runner (main thread) ──────────────────────────────────────────
+def run_bot():
+    logger.info("🚀 Starting Telegram bot in main thread...")
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", start))
+    app.add_handler(CommandHandler("ping", ping_cmd))
+    app.add_handler(CommandHandler("bias", matrix))
+    if ASSETS:
+        for a in ASSETS.keys():
+            app.add_handler(CommandHandler(a.lower(), asset_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, asset_handler))
+    app.add_handler(MessageHandler(filters.COMMAND, asset_handler))
+
+    logger.info("🤖 Bot starting polling (main thread, signal handlers allowed)...")
+    app.run_polling()  # blocking, runs in main thread
+
+# ─── Main Entry ──────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    # Start Flask in background thread
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info("🔄 Flask thread started")
+    # Run bot in main thread (this blocks)
+    run_bot()
