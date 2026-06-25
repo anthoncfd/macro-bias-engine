@@ -1,11 +1,12 @@
 """
 MACRO BIAS ENGINE - Data Ingestion Pipeline with Explicit Deterministic Backfill
-Fetches live market data, verifies historical matrix depth in Supabase, 
+Fetches live market data, verifies historical matrix depth in Supabase,
 reconstructs structural baseline history, and triggers analytics blocks.
 """
 import logging
 import sys
 from datetime import datetime, timedelta
+import time
 
 from src.database.supabase_client import get_supabase_client
 from src.ingestion.market_prices import fetch_all_prices, ASSETS
@@ -21,9 +22,10 @@ logger = logging.getLogger(__name__)
 ALL_TICKERS = list(ASSETS.keys()) + ["DXY", "VIX", "US10Y"]
 TARGET_ANALYTICS_ASSETS = list(ASSETS.keys())
 
+
 def verify_and_backfill_database(supabase, market_data):
     """
-    Evaluates every asset schema log length. If empty or truncated, seeds 
+    Evaluates every asset schema log length. If empty or truncated, seeds
     a deterministic mathematical distribution backwards over 19 distinct days.
     """
     logger.info("🛡️ Validating structural data integrity across assets...")
@@ -51,11 +53,8 @@ def verify_and_backfill_database(supabase, market_data):
         if row_count < 19:
             logger.info(f"📥 Generating historical baseline array matrix for {ticker} ({row_count}/19)...")
             for day_offset in range(19, 0, -1):
-                # Scale timestamps explicitly backwards to create distinct historical days
                 target_date = (timestamp_now - timedelta(days=day_offset))
                 historical_iso = target_date.strftime("%Y-%m-%dT16:00:00+00:00")
-                
-                # Apply minor incremental step variations to create clean variance for Z-Score math
                 variance_factor = 1.0 + (0.0002 * (day_offset % 4 - 2))
                 
                 backfill_payload.append({
@@ -119,11 +118,13 @@ def process_pipeline_ingestion():
         
         if metrics.get("status") == "SUCCESS":
             success_count += 1
-            logger.info(f"   📊 Unified profile parsed for {ticker:<6} | Score: {metrics['directional_score']:.1f}/100")
+            score = metrics.get('directional_score', metrics.get('probability', 0))
+            logger.info(f"   📊 Unified profile parsed for {ticker:<6} | Score: {score:.1f}/100")
         else:
             logger.error(f"   ❌ Analytics computation error for {ticker}: {metrics.get('message')}")
 
     logger.info(f"🏁 INGESTION PIPELINE COMPLETE | Successfully calculated {success_count} biases.")
+
 
 if __name__ == "__main__":
     process_pipeline_ingestion()
