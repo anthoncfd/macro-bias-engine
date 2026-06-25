@@ -1,16 +1,21 @@
 """
 MACRO BIAS ENGINE - Market Data Fetcher
-Uses direct Yahoo API for historical closes and live prices.
-For Gold (XAUUSD) and Silver (XAGUSD), uses GoldPrice.Today for live spot (free, no key).
+For Gold and Silver: uses dedicated metals API (free, no key) for both live AND daily close.
+For all other assets: uses Yahoo Finance.
 """
 import os
 import requests
 import time
 import random
 import logging
+from datetime import datetime
 
-# ─── Import the metals spot fetcher ────────────────────────────────────
-from src.ingestion.metals_spot_fetcher import fetch_metal_spots, METAL_SYMBOLS
+# ─── Import the metals fetcher ──────────────────────────────────────────
+from src.ingestion.metals_spot_fetcher import (
+    fetch_live_metal_spots, 
+    get_historical_data_for_supabase,
+    METAL_SYMBOLS
+)
 
 logger = logging.getLogger(__name__)
 
@@ -19,12 +24,12 @@ logger = logging.getLogger(__name__)
 # ==========================================
 
 ASSETS = {
-    # Metals: live price will come from spot API if available
-    "XAUUSD": ["XAUUSD=X", "GC=F"],          # Gold
-    "XAGUSD": ["XAGUSD=X", "SI=F"],          # Silver
-    "XPTUSD": ["XPTUSD=X", "PL=F"],          # Platinum
-    "XPDUSD": ["XPDUSD=X", "PA=F"],          # Palladium
-    "XRHUSD": ["XRHUSD=X", "RH=F"],          # Rhodium
+    # Metals: now fetched from dedicated API (not Yahoo)
+    "XAUUSD": ["XAUUSD=X", "GC=F"],          # Gold - metal API handles actual data
+    "XAGUSD": ["XAGUSD=X", "SI=F"],          # Silver - metal API handles actual data
+    "XPTUSD": ["XPTUSD=X", "PL=F"],          # Platinum - still Yahoo
+    "XPDUSD": ["XPDUSD=X", "PA=F"],          # Palladium - still Yahoo
+    "XRHUSD": ["XRHUSD=X", "RH=F"],          # Rhodium - still Yahoo
     # Crypto & Indices
     "BTCUSD": ["BTC-USD"],
     "JP225": ["^N225"],
@@ -47,7 +52,7 @@ FOREX_PAIRS = ["EURUSD", "GBPUSD", "AUDUSD", "EURJPY", "GBPJPY", "CADJPY", "CADC
 
 def safe_fetch(ticker, retries=3):
     """
-    Fetches the latest CLOSING price (daily adjusted close).
+    Fetches the latest CLOSING price from Yahoo Finance.
     Uses '5d' range to ensure weekend data is captured.
     """
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
@@ -75,9 +80,30 @@ def safe_fetch(ticker, retries=3):
     return None
 
 def fetch_all_prices():
-    """Loops through all assets and returns a dictionary of closing prices."""
+    """
+    Loops through all assets and returns a dictionary of closing prices.
+    Gold and Silver use dedicated metals API; others use Yahoo.
+    """
     prices = {}
+    
+    # ─── Gold and Silver: Use dedicated API ──────────────────────────
+    gold_history = get_historical_data_for_supabase("XAUUSD", 5)
+    if gold_history and len(gold_history) > 0:
+        prices["XAUUSD"] = gold_history[-1]["latest_close"]
+    else:
+        prices["XAUUSD"] = None
+    
+    silver_history = get_historical_data_for_supabase("XAGUSD", 5)
+    if silver_history and len(silver_history) > 0:
+        prices["XAGUSD"] = silver_history[-1]["latest_close"]
+    else:
+        prices["XAGUSD"] = None
+    
+    # ─── All other assets: Use Yahoo ────────────────────────────────
     for name, tickers in ASSETS.items():
+        if name in ["XAUUSD", "XAGUSD"]:
+            continue  # Already handled above
+        
         price = None
         for t in tickers:
             price = safe_fetch(t)
@@ -86,27 +112,26 @@ def fetch_all_prices():
             time.sleep(0.5)
         prices[name] = price
         time.sleep(random.uniform(0.5, 1.0))
+    
     return prices
 
 def fetch_live_price(tickers):
     """
     Fetches current intraday price.
-    For Gold (XAUUSD) and Silver (XAGUSD), uses GoldPrice.Today (free, no key).
-    For other metals and all other assets, uses Yahoo Finance (1m → 5m fallback).
+    For Gold (XAUUSD) and Silver (XAGUSD): uses dedicated metals API.
+    For all other assets: uses Yahoo Finance (1m → 5m fallback).
     """
-    # ─── Check if any ticker is a metal we can get from spot API ────
-    metals_available = ["XAUUSD", "XAGUSD"]  # Only gold and silver from GoldPrice.Today
-    metals_to_fetch = [t for t in tickers if t in metals_available]
+    # ─── Check if metal ────────────────────────────────────────────────
+    metals_to_fetch = [t for t in tickers if t in ["XAUUSD", "XAGUSD"]]
     if metals_to_fetch:
-        # Fetch all metal spots (only gold/silver will return a price)
-        all_metal_prices = fetch_metal_spots()
+        live_prices = fetch_live_metal_spots()
         for metal in metals_to_fetch:
-            if metal in all_metal_prices and all_metal_prices[metal] is not None:
-                logger.info(f"📡 Live price from GoldPrice.Today: {metal} = {all_metal_prices[metal]}")
-                return all_metal_prices[metal]
-        # If spot API failed, fall through to Yahoo Finance
+            if metal in live_prices and live_prices[metal] is not None:
+                logger.info(f"📡 Live {metal}: ${live_prices[metal]}")
+                return live_prices[metal]
+        # If API failed, fall through to Yahoo
 
-    # ─── Fallback: Yahoo Finance for all assets ──────────────────────
+    # ─── Fallback: Yahoo Finance ──────────────────────────────────────
     intervals = ["1m", "5m"]
     for ticker in tickers:
         for interval in intervals:
@@ -132,10 +157,7 @@ def fetch_live_price(tickers):
     return None
 
 def fetch_adjusted_close(ticker, days_back=5):
-    """
-    Fetches the official adjusted close for a specific date.
-    More accurate than the last close in the array.
-    """
+    """Fetches adjusted close from Yahoo (for non-metal assets)."""
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
     headers = {"User-Agent": "Mozilla/5.0"}
     params = {"range": f"{days_back}d", "interval": "1d"}
