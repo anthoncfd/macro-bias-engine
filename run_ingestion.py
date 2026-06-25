@@ -1,130 +1,216 @@
 """
-MACRO BIAS ENGINE - Data Ingestion Pipeline with Explicit Deterministic Backfill
-Fetches live market data, verifies historical matrix depth in Supabase,
-reconstructs structural baseline history, and triggers analytics blocks.
+MACRO BIAS ENGINE - Main Ingestion Pipeline
+Auto-backfills if database is empty, then runs daily ingestion.
+Prevents duplicate rows for the same day.
+Gold & Silver: uses GoldPrice.Today for daily close (spot).
+Other assets: Yahoo daily close.
 """
-import logging
 import sys
-from datetime import datetime, timedelta
+import os
 import time
+import yfinance as yf
+import pandas as pd
+from datetime import datetime, timedelta
+
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from src.database.supabase_client import get_supabase_client
-from src.ingestion.market_prices import fetch_all_prices, ASSETS
-from src.ingestion.macro_data_fetcher import fetch_macro_data
-from src.analytics.bias_engine import calculate_bias_for_asset
+from src.ingestion.market_prices import fetch_all_prices, FOREX_PAIRS, ASSETS
+from src.ingestion.metals_spot_fetcher import fetch_metal_spots
 
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-ALL_TICKERS = list(ASSETS.keys()) + ["DXY", "VIX", "US10Y"]
-TARGET_ANALYTICS_ASSETS = list(ASSETS.keys())
-
-
-def verify_and_backfill_database(supabase, market_data):
-    """
-    Evaluates every asset schema log length. If empty or truncated, seeds
-    a deterministic mathematical distribution backwards over 19 distinct days.
-    """
-    logger.info("🛡️ Validating structural data integrity across assets...")
-    timestamp_now = datetime.utcnow()
+def run_backfill(days_back=10):
+    """Backfill historical data into Supabase."""
+    print(f"\n📥 BACKFILLING {days_back} days of historical data...")
+    print("=" * 55)
     
-    backfill_payload = []
-    live_snapshot_payload = []
+    supabase = get_supabase_client()
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=days_back)
+    total_inserted = 0
+    
+    for display_name, tickers in ASSETS.items():
+        print(f"\n📊 Processing {display_name}...")
+        df = None
+        # For gold and silver, we can't backfill with Yahoo; skip or use API.
+        # We'll rely on the daily ingestion to build history.
+        if display_name in ["XAUUSD", "XAGUSD"]:
+            print(f"   ⚠️ {display_name} uses spot API – skipping backfill (data will accumulate daily).")
+            continue
+        
+        for ticker in tickers:
+            try:
+                df = yf.download(
+                    ticker,
+                    start=start_date.strftime("%Y-%m-%d"),
+                    end=end_date.strftime("%Y-%m-%d"),
+                    interval="1d",
+                    progress=False,
+                    auto_adjust=True
+                )
+                if not df.empty:
+                    print(f"   ✅ Using ticker: {ticker}")
+                    break
+            except Exception as e:
+                print(f"   ⚠️ Ticker {ticker} failed: {e}")
+                continue
+        
+        if df is None or df.empty:
+            print(f"   ❌ No data found for {display_name}")
+            continue
+        
+        for date_idx, row in df.iterrows():
+            try:
+                price = row['Close']
+                if isinstance(price, pd.Series):
+                    price = price.iloc[0]
+                price = float(price)
+            except:
+                continue
+            
+            if pd.isna(price):
+                continue
+            
+            date_str = date_idx.strftime("%Y-%m-%d")
+            
+            check = supabase.table("market_structure_logs") \
+                .select("id") \
+                .eq("ticker", display_name) \
+                .eq("created_at", date_str) \
+                .execute()
+            
+            if check.data:
+                continue
+            
+            row_data = {
+                "ticker": display_name,
+                "latest_close": price,
+                "trend": "NEUTRAL",
+                "momentum_score": 0.0,
+                "created_at": date_str
+            }
+            
+            try:
+                supabase.table("market_structure_logs").insert(row_data).execute()
+                total_inserted += 1
+                print(f"   📅 {date_str}: {price}")
+            except Exception as e:
+                print(f"   ❌ Insert failed: {e}")
+            
+            time.sleep(0.05)
+        time.sleep(0.3)
+    
+    print(f"\n✅ Backfill complete! Inserted {total_inserted} rows.")
+    return total_inserted
 
-    for ticker in ALL_TICKERS:
-        price = market_data.get(ticker)
+def get_row_count():
+    """Get number of distinct daily close points in database."""
+    try:
+        supabase = get_supabase_client()
+        result = supabase.table("market_structure_logs") \
+            .select("created_at") \
+            .order("created_at", desc=True) \
+            .limit(100) \
+            .execute()
+        
+        if not result.data:
+            return 0
+            
+        dates = {row['created_at'].split('T')[0] for row in result.data}
+        return len(dates)
+    except Exception as e:
+        print(f"   ⚠️ Row count check failed: {e}")
+        return 0
+
+def run_pipeline():
+    """Executes the complete pipeline synchronization process."""
+    print("=" * 55)
+    print("🚀 MACRO BIAS ENGINE - INGESTION PIPELINE")
+    print(f"📅 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 55)
+
+    print("\n🔍 Checking database for sufficient historical depth...")
+    row_count = get_row_count()
+    print(f"   📊 Found {row_count} distinct daily points in database")
+
+    if row_count < 10:
+        days_needed = 10 - row_count
+        print(f"\n⚠️ Only {row_count} days of data. Backfilling {days_needed + 5} more days...")
+        run_backfill(days_back=days_needed + 5)
+    else:
+        print("\n✅ Database has sufficient history. Skipping backfill.")
+
+    print("\n⏳ Waiting 3 seconds...")
+    time.sleep(3)
+
+    # ─── Fetch today's closes ────────────────────────────────────────
+    print("\n📊 Fetching live market data...")
+    prices = fetch_all_prices()
+
+    print("\n📊 Market Snapshot:")
+    for name, price in prices.items():
+        if price is None:
+            print(f"   ❌ {name:10} : No data")
+        elif name in FOREX_PAIRS:
+            print(f"   ✅ {name:10} : {price:.4f}")
+        else:
+            print(f"   ✅ {name:10} : ${price:,.2f}")
+
+    print("\n🔌 Connecting to Supabase...")
+    try:
+        supabase = get_supabase_client()
+        print("   ✅ Connection successful!")
+    except Exception as e:
+        print(f"   ❌ Connection failed: {e}")
+        return
+
+    print("\n📤 Syncing logs to 'market_structure_logs'...")
+    inserted_count = 0
+    today_string = datetime.now().strftime("%Y-%m-%d")
+    
+    for name, price in prices.items():
         if price is None:
             continue
             
-        raw_price = float(price)
-        
-        # Check current row count in log ledger table
-        res = supabase.table("market_structure_logs") \
-            .select("id", count="exact") \
-            .eq("ticker", ticker) \
+        # ─── Check if today's close already exists ────────────────────
+        dup_check = supabase.table("market_structure_logs") \
+            .select("id") \
+            .eq("ticker", name) \
+            .eq("created_at", today_string) \
             .execute()
             
-        row_count = res.count if res.count is not None else len(res.data)
-        
-        # If the table has been truncated or cleared, build history step-by-step
-        if row_count < 19:
-            logger.info(f"📥 Generating historical baseline array matrix for {ticker} ({row_count}/19)...")
-            for day_offset in range(19, 0, -1):
-                target_date = (timestamp_now - timedelta(days=day_offset))
-                historical_iso = target_date.strftime("%Y-%m-%dT16:00:00+00:00")
-                variance_factor = 1.0 + (0.0002 * (day_offset % 4 - 2))
-                
-                backfill_payload.append({
-                    "ticker": ticker,
-                    "latest_close": raw_price * variance_factor,
-                    "trend": "NEUTRAL",
-                    "momentum_score": 0.0,
-                    "created_at": historical_iso
-                })
-        
-        # Add today's live execution snapshot record row
-        live_snapshot_payload.append({
-            "ticker": ticker,
-            "latest_close": raw_price,
+        if dup_check.data:
+            print(f"   ⚪ {name} already recorded for today ({today_string}). Skipping.")
+            continue
+
+        row = {
+            "ticker": name,
+            "latest_close": float(price),
             "trend": "NEUTRAL",
             "momentum_score": 0.0,
-            "created_at": timestamp_now.strftime("%Y-%m-%dT%H:%M:%S+00:00")
-        })
+            "created_at": today_string
+        }
+        try:
+            supabase.table("market_structure_logs").insert(row).execute()
+            print(f"   ✅ Inserted {name}")
+            inserted_count += 1
+        except Exception as e:
+            print(f"   ❌ Failed {name}: {e}")
 
-    # Bulk insert historical baselines first if needed
-    if backfill_payload:
-        logger.info(f"📤 Bulk uploading {len(backfill_payload)} historical records to ledger...")
-        supabase.table("market_structure_logs").insert(backfill_payload).execute()
-        logger.info("✅ Historical baseline arrays committed successfully.")
+    print(f"\n📊 Inserted {inserted_count} assets today")
 
-    # Bulk insert today's current real-time prices
-    if live_snapshot_payload:
-        supabase.table("market_structure_logs").insert(live_snapshot_payload).execute()
-        logger.info(f"✅ Real-time pipeline prices committed ({len(live_snapshot_payload)} rows).")
-
-
-def process_pipeline_ingestion():
-    """Primary ingestion execution sequence lifecycle block."""
-    logger.info("🚀 INITIALIZING INGESTION PIPELINE RUN")
-    supabase = get_supabase_client()
+    print("\n" + "=" * 55)
+    print("🧠 RUNNING QUANTITATIVE BIAS ENGINE")
+    print("=" * 55)
     
     try:
-        logger.info("📊 Fetching live market data arrays...")
-        prices = fetch_all_prices()
-        macro_data = fetch_macro_data()
-        
-        market_data = {**prices, **macro_data}
-        market_data["DXY"] = macro_data.get("dxy")
-        market_data["VIX"] = macro_data.get("vix")
-        market_data["US10Y"] = macro_data.get("us10y")
-        logger.info("✅ Market data fetched successfully from remote endpoints")
-    except Exception as api_err:
-        logger.error(f"❌ Failed to fetch upstream data: {api_err}")
-        sys.exit(1)
+        from src.analytics.bias_engine import run_bias_engine
+        run_bias_engine()
+    except Exception as e:
+        print(f"❌ Bias Engine execution crash: {e}")
 
-    # Validate depth and backfill missing days deterministically
-    verify_and_backfill_database(supabase, market_data)
-    
-    # Trigger Real-Time Bias Calculation Engine Loop
-    logger.info("🧠 RUNNING QUANTITATIVE BIAS ENGINE MATRIX")
-    success_count = 0
-    
-    for ticker in TARGET_ANALYTICS_ASSETS:
-        live_price_override = market_data.get(ticker)
-        metrics = calculate_bias_for_asset(ticker, live_price_override=live_price_override)
-        
-        if metrics.get("status") == "SUCCESS":
-            success_count += 1
-            score = metrics.get('directional_score', metrics.get('probability', 0))
-            logger.info(f"   📊 Unified profile parsed for {ticker:<6} | Score: {score:.1f}/100")
-        else:
-            logger.error(f"   ❌ Analytics computation error for {ticker}: {metrics.get('message')}")
-
-    logger.info(f"🏁 INGESTION PIPELINE COMPLETE | Successfully calculated {success_count} biases.")
-
+    print("\n" + "=" * 55)
+    print("✅ PIPELINE COMPLETE")
+    print("=" * 55)
 
 if __name__ == "__main__":
-    process_pipeline_ingestion()
+    run_pipeline()
