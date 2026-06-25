@@ -1,14 +1,14 @@
 """
 METALS SPOT PRICE FETCHER - Completely Free, No API Key Required
-Uses GoldPrice.Today for Gold and Silver (updates every 5 minutes).
-Other metals fall back to Yahoo Finance.
+Fetches live spot prices AND historical daily closes for Gold and Silver.
+Uses GoldPrice.Today (updates every 5 minutes).
 """
 import requests
 import logging
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-# Mapping from display symbol (used in bot) to human-readable name
 METAL_SYMBOLS = {
     "XAUUSD": {"display": "Gold"},
     "XAGUSD": {"display": "Silver"},
@@ -17,12 +17,10 @@ METAL_SYMBOLS = {
     "XRHUSD": {"display": "Rhodium"},
 }
 
-def fetch_metal_spots(api_key=None):
+def fetch_live_metal_spots():
     """
     Fetch live spot prices for Gold and Silver from GoldPrice.Today.
-    No API key required. Updates every ~5 minutes.
     Returns a dict with keys: 'XAUUSD', 'XAGUSD' (prices in USD).
-    Other metals (Platinum, Palladium, Rhodium) are set to None.
     """
     result = {}
     try:
@@ -34,84 +32,63 @@ def fetch_metal_spots(api_key=None):
             
             if "gold_price" in usd_data:
                 result["XAUUSD"] = float(usd_data["gold_price"])
-                logger.info(f"📡 Gold spot from GoldPrice.Today: ${result['XAUUSD']:.2f}")
+                logger.info(f"📡 Gold spot: ${result['XAUUSD']:.2f}")
             if "silver_price" in usd_data:
                 result["XAGUSD"] = float(usd_data["silver_price"])
-                logger.info(f"📡 Silver spot from GoldPrice.Today: ${result['XAGUSD']:.2f}")
+                logger.info(f"📡 Silver spot: ${result['XAGUSD']:.2f}")
         else:
             logger.warning(f"GoldPrice.Today returned status {response.status_code}")
     except Exception as e:
         logger.warning(f"GoldPrice.Today fetch failed: {e}")
     
-    # For other metals, we don't have a free spot source, so set to None
-    # The caller will fall back to Yahoo Finance for these.
-    for sym in ["XPTUSD", "XPDUSD", "XRHUSD"]:
-        result[sym] = None
-    
     return result
 
-def fetch_metal_spot(metal_symbol, api_key=None):
+def fetch_historical_close(metal, days_back=60):
     """
-    Convenience function to fetch a single metal price.
-    Returns float or None.
+    Fetch historical daily closes for a metal from GoldPrice.Today.
+    Returns a list of dicts: [{"date": "2026-06-25", "close": 3983.44}, ...]
     """
-    all_prices = fetch_metal_spots(api_key)
-    return all_prices.get(metal_symbol)"""
-METALS SPOT PRICE FETCHER - Completely Free, No API Key Required
-Uses GoldPrice.Today for Gold and Silver (updates every 5 minutes).
-Other metals fall back to Yahoo Finance.
-"""
-import requests
-import logging
-
-logger = logging.getLogger(__name__)
-
-# Mapping from display symbol (used in bot) to human-readable name
-METAL_SYMBOLS = {
-    "XAUUSD": {"display": "Gold"},
-    "XAGUSD": {"display": "Silver"},
-    "XPTUSD": {"display": "Platinum"},
-    "XPDUSD": {"display": "Palladium"},
-    "XRHUSD": {"display": "Rhodium"},
-}
-
-def fetch_metal_spots(api_key=None):
-    """
-    Fetch live spot prices for Gold and Silver from GoldPrice.Today.
-    No API key required. Updates every ~5 minutes.
-    Returns a dict with keys: 'XAUUSD', 'XAGUSD' (prices in USD).
-    Other metals (Platinum, Palladium, Rhodium) are set to None.
-    """
-    result = {}
     try:
-        url = "https://GoldPrice.Today/api.php?data=live"
+        # GoldPrice.Today API for historical data
+        # This endpoint returns closing prices for the last N days
+        url = f"https://GoldPrice.Today/api.php?data=historical&metal={metal}&days={days_back}"
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
-            usd_data = data.get("USD", {})
-            
-            if "gold_price" in usd_data:
-                result["XAUUSD"] = float(usd_data["gold_price"])
-                logger.info(f"📡 Gold spot from GoldPrice.Today: ${result['XAUUSD']:.2f}")
-            if "silver_price" in usd_data:
-                result["XAGUSD"] = float(usd_data["silver_price"])
-                logger.info(f"📡 Silver spot from GoldPrice.Today: ${result['XAGUSD']:.2f}")
+            # The API returns data in format: {"data": [{"date": "...", "price": ...}, ...]}
+            historical = []
+            for entry in data.get("data", []):
+                historical.append({
+                    "date": entry.get("date"),
+                    "close": float(entry.get("price", 0))
+                })
+            return historical
         else:
-            logger.warning(f"GoldPrice.Today returned status {response.status_code}")
+            logger.warning(f"Historical data fetch failed: {response.status_code}")
     except Exception as e:
-        logger.warning(f"GoldPrice.Today fetch failed: {e}")
+        logger.warning(f"Historical fetch error: {e}")
     
-    # For other metals, we don't have a free spot source, so set to None
-    # The caller will fall back to Yahoo Finance for these.
-    for sym in ["XPTUSD", "XPDUSD", "XRHUSD"]:
-        result[sym] = None
-    
-    return result
+    return []
 
-def fetch_metal_spot(metal_symbol, api_key=None):
+def get_historical_data_for_supabase(metal_symbol, days_back=60):
     """
-    Convenience function to fetch a single metal price.
-    Returns float or None.
+    Wrapper that returns historical data formatted for Supabase insertion.
     """
-    all_prices = fetch_metal_spots(api_key)
-    return all_prices.get(metal_symbol)
+    metal_map = {
+        "XAUUSD": "gold",
+        "XAGUSD": "silver"
+    }
+    metal = metal_map.get(metal_symbol)
+    if not metal:
+        return []
+    
+    history = fetch_historical_close(metal, days_back)
+    result = []
+    for entry in history:
+        if entry.get("date") and entry.get("close"):
+            result.append({
+                "ticker": metal_symbol,
+                "latest_close": entry["close"],
+                "created_at": entry["date"]
+            })
+    return result
