@@ -1,6 +1,5 @@
 """
-MACRO BIAS ENGINE - Telegram Bot (Main Thread)
-Flask runs in background thread to keep Render alive.
+MACRO BIAS ENGINE - Telegram Bot (with Live Price)
 """
 import os
 import sys
@@ -58,13 +57,13 @@ def debug():
 def load_bias_engine():
     try:
         from src.analytics.bias_engine import calculate_bias_for_asset, run_bias_engine
-        from src.ingestion.market_prices import ASSETS, FOREX_PAIRS
-        return calculate_bias_for_asset, run_bias_engine, ASSETS, FOREX_PAIRS
+        from src.ingestion.market_prices import ASSETS, FOREX_PAIRS, fetch_live_price
+        return calculate_bias_for_asset, run_bias_engine, ASSETS, FOREX_PAIRS, fetch_live_price
     except Exception as e:
         logger.error(f"❌ Import error: {e}", exc_info=True)
-        return None, None, None, None
+        return None, None, None, None, None
 
-calc, run, ASSETS, FOREX = load_bias_engine()
+calc, run, ASSETS, FOREX, fetch_live = load_bias_engine()
 if calc is None:
     logger.error("❌ Bias engine not loaded! Bot will not work.")
 
@@ -102,21 +101,33 @@ async def asset_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"⚠️ {metrics.get('message')}")
             return
 
+        # ─── Fetch Live Price ──────────────────────────────────────────
+        live_price = None
+        if fetch_live:
+            tickers = ASSETS.get(ticker, [])
+            if tickers:
+                live_price = fetch_live(tickers)
+                if live_price:
+                    logger.info(f"📡 Live price for {ticker}: {live_price}")
+
+        # ─── Formatting ────────────────────────────────────────────────
         is_fx = ticker in FOREX if FOREX else False
-        price_str = f"{metrics['latest_close']:.4f}" if is_fx else f"${metrics['latest_close']:,.2f}"
+        close_str = f"{metrics['latest_close']:.4f}" if is_fx else f"${metrics['latest_close']:,.2f}"
         sma_str = f"{metrics['sma_20']:.4f}" if is_fx else f"${metrics['sma_20']:,.2f}"
+        live_str = f"{live_price:.4f}" if live_price and is_fx else f"${live_price:,.2f}" if live_price else "❌ Unavailable"
         dir_emoji = "🟢" if metrics["direction"] == "BULLISH" else "🔴" if metrics["direction"] == "BEARISH" else "⚪"
 
         reply = (
             f"📊 **MACRO PROFILE: {ticker}**\n"
             f"📅 As of: {metrics.get('last_update', 'N/A')}\n\n"
-            f"💵 Close: `{price_str}`\n"
-            f"📉 20‑Day SMA: `{sma_str}`\n"
-            f"🎚️ Z‑Score: `{metrics['z_score']:+.2f}`\n"
-            f"🚀 Momentum: `{metrics['momentum_pct']:+.2f}%`\n\n"
-            f"🤖 Direction: {dir_emoji} `{metrics['direction']}`\n"
-            f"🎯 Probability: `{metrics['probability']:.1f}%`\n"
-            f"🛡️ Confidence: `{metrics['confidence']:.1f}%`"
+            f"💰 **Live Price:** `{live_str}`\n"
+            f"💵 **Close:** `{close_str}`\n"
+            f"📉 **20‑Day SMA:** `{sma_str}`\n"
+            f"🎚️ **Z‑Score:** `{metrics['z_score']:+.2f}`\n"
+            f"🚀 **Momentum:** `{metrics['momentum_pct']:+.2f}%`\n\n"
+            f"🤖 **Direction:** {dir_emoji} `{metrics['direction']}`\n"
+            f"🎯 **Probability:** `{metrics['probability']:.1f}%`\n"
+            f"🛡️ **Confidence:** `{metrics['confidence']:.1f}%`"
         )
         await update.message.reply_text(reply, parse_mode="Markdown")
         logger.info(f"✅ Sent report for {ticker}")
@@ -163,14 +174,12 @@ def run_bot():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, asset_handler))
     app.add_handler(MessageHandler(filters.COMMAND, asset_handler))
 
-    logger.info("🤖 Bot starting polling (main thread, signal handlers allowed)...")
-    app.run_polling()  # blocking, runs in main thread
+    logger.info("🤖 Bot starting polling (main thread)...")
+    app.run_polling()
 
 # ─── Main Entry ──────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Start Flask in background thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("🔄 Flask thread started")
-    # Run bot in main thread (this blocks)
     run_bot()
