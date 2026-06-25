@@ -1,164 +1,181 @@
 """
-MACRO BIAS ENGINE - Core Analytics Engine
-Processes trailing asset closes, handles multi-day mathematical lookbacks,
-and evaluates quantitative directional momentum profiles.
-Logs outputs to the 'predictions' table for trend tracking.
+MACRO BIAS ENGINE - Quantitative Bias Engine (V2.1 + Prediction Logging)
+Calculates Z-scores, momentum, and directional biases from historical data.
+Logs daily predictions to the 'predictions' table for future accuracy tracking.
 """
 import os
 import sys
-import math
-import logging
-import traceback
-from datetime import datetime
 import pandas as pd
+import numpy as np
+from datetime import datetime
 
-# Ensure system path aligns with repository root directory
+# Add repo root to path for imports
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if BASE_DIR not in sys.path:
     sys.path.append(BASE_DIR)
 
 from src.database.supabase_client import get_supabase_client
+from src.ingestion.market_prices import ASSETS, FOREX_PAIRS
 
-logger = logging.getLogger(__name__)
+# --- Configuration ---
+HISTORY_DAYS = 60          # Lookback window for historical data
+SMA_WINDOW = 20            # Moving average period
+MIN_DATA_POINTS = 10       # Minimum data points required for reliable calculation
 
-HISTORY_DAYS = 60
-SMA_WINDOW = 20
-MIN_DATA_POINTS = 10
 
-def datetime_to_date_key():
-    """Generates an integer calendar primary key (YYYYMMDD) matching standard schemas."""
-    return int(datetime.utcnow().strftime("%Y%m%d"))
+def fetch_asset_history(display_name):
+    """
+    Fetch historical closing prices for a given asset from Supabase.
 
-def fetch_asset_history(ticker):
-    """Fetch historical log array components safely from Supabase."""
-    logger.info(f"📥 Fetching history matrix for {ticker}...")
+    Args:
+        display_name (str): Asset ticker (e.g., 'EURUSD', 'XAUUSD')
+
+    Returns:
+        pd.DataFrame: DataFrame with columns ['latest_close', 'created_at'],
+                      sorted chronologically. Empty if no data.
+    """
+    print(f"   📥 Fetching history for {display_name}...")
     try:
         supabase = get_supabase_client()
         response = supabase.table("market_structure_logs") \
-            .select("latest_close, created_at") \
-            .eq("ticker", ticker) \
+            .select("latest_close", "created_at") \
+            .eq("ticker", display_name) \
             .order("created_at", desc=True) \
             .limit(HISTORY_DAYS) \
             .execute()
-        
-        if not response or not response.data:
-            logger.warning(f"⚠️ No historical rows located for symbol: {ticker}")
+
+        if not response.data:
+            print(f"   ⚠️ No data for {display_name}")
             return pd.DataFrame()
-        
+
         df = pd.DataFrame(response.data)
+        # Convert timestamps (handles both with/without microseconds)
         df['created_at'] = pd.to_datetime(df['created_at'], format='mixed')
         df = df.sort_values('created_at').reset_index(drop=True)
+        print(f"   ✅ Found {len(df)} rows for {display_name}")
         return df
     except Exception as e:
-        logger.error(f"❌ Database error retrieving log history for {ticker}: {e}")
+        print(f"   ❌ Error fetching {display_name}: {e}")
         return pd.DataFrame()
 
-def calculate_bias_for_asset(ticker, live_price_override=None):
+
+def calculate_bias_for_asset(display_name):
     """
-    Computes real-time trend bias metrics using mathematical lookbacks
-    and upserts results cleanly into the 'predictions' table layout.
+    Compute bias metrics for a single asset and log prediction.
+
+    Args:
+        display_name (str): Asset ticker (must exist in ASSETS)
+
+    Returns:
+        dict: Dictionary with status, metrics, and optional error message.
     """
+    # 1. Fetch historical data
+    df = fetch_asset_history(display_name)
+
+    if len(df) < MIN_DATA_POINTS:
+        return {
+            "ticker": display_name,
+            "status": "INSUFFICIENT_DATA",
+            "data_points": len(df),
+            "message": f"Need {MIN_DATA_POINTS} instances, found {len(df)}"
+        }
+
+    # 2. Calculate rolling SMA and standard deviation
+    window = min(SMA_WINDOW, len(df))
+    df['sma'] = df['latest_close'].rolling(window=window).mean()
+    df['std'] = df['latest_close'].rolling(window=window).std()
+
+    # 3. Get latest values
+    latest_close = float(df['latest_close'].iloc[-1])
+    latest_sma = float(df['sma'].iloc[-1])
+    latest_std = float(df['std'].iloc[-1])
+
+    # 4. Compute Z-score
+    z_score = (latest_close - latest_sma) / latest_std if latest_std and latest_std > 0 else 0.0
+
+    # 5. Compute 1-day momentum (% change)
+    prev_close = float(df['latest_close'].iloc[-2]) if len(df) > 1 else latest_close
+    momentum_pct = ((latest_close - prev_close) / prev_close) * 100
+
+    # 6. Determine directional bias
+    if latest_close > latest_sma and z_score > 0.3:
+        direction = "BULLISH"
+    elif latest_close < latest_sma and z_score < -0.3:
+        direction = "BEARISH"
+    else:
+        direction = "NEUTRAL"
+
+    # 7. Probability mapping (linear) – to be improved with logistic in future
+    raw_prob = 0.5 + (z_score * 0.15)
+    probability = max(5.0, min(95.0, raw_prob * 100))
+
+    # 8. Confidence score (higher Z = higher confidence)
+    confidence_base = 0.7 + (0.3 * min(1.0, abs(z_score) / 3.0))
+    confidence = min(95.0, confidence_base * 100)
+
+    # 9. Build result dictionary
+    result = {
+        "ticker": display_name,
+        "status": "SUCCESS",
+        "data_points": len(df),
+        "latest_close": latest_close,
+        "sma_20": latest_sma,
+        "z_score": round(z_score, 2),
+        "momentum_pct": round(momentum_pct, 2),
+        "direction": direction,
+        "probability": round(probability, 1),
+        "confidence": round(confidence, 1),
+        "last_update": df['created_at'].iloc[-1].strftime('%Y-%m-%d %H:%M:%S')
+    }
+
+    # 10. Insert prediction into Supabase (upsert)
     try:
         supabase = get_supabase_client()
-        df = fetch_asset_history(ticker)
-        
-        # Build raw array lists from data frames
-        raw_data = df.to_dict(orient='records')
-
-        # Append real-time override snapshot if passed explicitly by pipeline
-        if live_price_override is not None:
-            if not raw_data or abs(float(raw_data[-1]["latest_close"]) - float(live_price_override)) > 1e-6:
-                raw_data.append({"latest_close": float(live_price_override), "created_at": datetime.utcnow()})
-
-        if len(raw_data) < MIN_DATA_POINTS:
-            raise IndexError(f"Insufficient history data points. Matrix count is {len(raw_data)}/{MIN_DATA_POINTS}")
-
-        # Extract closing array primitives cleanly
-        closes = [float(row["latest_close"]) for row in raw_data]
-
-        # 1. Quantitative Core Calculations
-        current_price = closes[-1]
-        window = min(SMA_WINDOW, len(closes))
-        
-        # Metric A: Simple Moving Average (Baseline Tracking)
-        sma_20 = sum(closes[-window:]) / window
-
-        # Metric B: Trailing Volatility Profiles (Standard Deviation)
-        variance = sum((x - sma_20) ** 2 for x in closes[-window:]) / window
-        std_dev = math.sqrt(variance)
-
-        # Metric C: Momentum Rate-of-Change Factor (Velocity Vector)
-        prev_close = closes[-2] if len(closes) > 1 else current_price
-        momentum_pct = ((current_price - prev_close) / prev_close) * 100
-
-        # 2. Score Assignment Mechanics (Z-Score & Velocity Weighted Scales)
-        z_score = (current_price - sma_20) / std_dev if std_dev > 0 else 0.0
-        
-        calculated_score = 50.0
-        if current_price > sma_20 and z_score > 0.3:
-            trend_signal = "BULLISH"
-            calculated_score += 20.0
-        elif current_price < sma_20 and z_score < -0.3:
-            trend_signal = "BEARISH"
-            calculated_score -= 20.0
-        else:
-            trend_signal = "NEUTRAL"
-
-        # Apply volatility shifts to the analytical weight score
-        calculated_score += (momentum_pct * 5.0)
-        calculated_score = max(5.0, min(95.0, calculated_score))
-
-        # Determine conviction threshold using standard deviations distance
-        if std_dev == 0:
-            conviction_rating = "LOW"
-        else:
-            deviation_distance = abs(z_score)
-            if deviation_distance > 2.0:
-                conviction_rating = "EXTREME"
-            elif deviation_distance > 1.2:
-                conviction_rating = "HIGH"
-            elif deviation_distance > 0.6:
-                conviction_rating = "MODERATE"
-            else:
-                conviction_rating = "LOW"
-
-        # 3. Record Outputs to Central Database Using Fixed Verified Schema Mapping
-        created_date_key = datetime_to_date_key()
-        prediction_record = {
-            "ticker": ticker,
-            "created_date_key": created_date_key,
-            "trend": trend_signal,
-            "momentum_score": round(z_score, 2),
-            "latest_close": round(current_price, 5)
+        today = datetime.now().strftime("%Y-%m-%d")
+        prediction_row = {
+            "ticker": display_name,
+            "created_date_key": today,
+            "latest_close": latest_close,
+            "trend": direction,
+            "momentum_score": round(z_score, 2)
         }
+        supabase.table("predictions") \
+            .upsert(prediction_row, on_conflict="ticker,created_date_key") \
+            .execute()
+        print(f"   📝 Prediction logged for {display_name}")
+    except Exception as e:
+        # Silently log warning but don't break the pipeline
+        print(f"   ⚠️ Prediction insert skipped for {display_name}: {e}")
 
-        # Safe upsert handling mapping structural parameters directly 
-        supabase.table("predictions").upsert(
-            prediction_record, 
-            on_conflict="ticker,created_date_key"
-        ).execute()
+    return result
 
-        logger.info(f"📝 Prediction successfully logged for {ticker}")
 
-        return {
-            "status": "SUCCESS",
-            "ticker": ticker,
-            "latest_close": current_price,
-            "sma_20": sma_20,
-            "z_score": round(z_score, 2),
-            "momentum_pct": round(momentum_pct, 2),
-            "direction": trend_signal,
-            "probability": round(calculated_score, 1),
-            "confidence": conviction_rating
-        }
+def run_bias_engine():
+    """
+    Orchestrate the full bias engine run across all assets.
 
-    except IndexError as idx_err:
-        logger.warning(f"⚠️ Index limits hit processing analytics matrix for {ticker}: {idx_err}")
-        return {"status": "ERROR", "message": f"Array sizing constraint: {str(idx_err)}"}
+    Returns:
+        dict: A dictionary of results keyed by asset ticker.
+    """
+    print("=" * 60)
+    print("🧠 MACRO BIAS ENGINE - QUANTITATIVE ANALYSIS")
+    print(f"📅 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 60)
 
-    except Exception as general_err:
-        logger.error(f"💥 Internal processor calculation exception occurred for {ticker}: {str(general_err)}")
-        print("\n=== RAW ENGINE MATHEMATICAL EXCEPTION TRACEBACK ===")
-        traceback.print_exc()
-        print("===================================================\n")
-        return {"status": "ERROR", "message": str(general_err)}
+    results = {}
+    for display_name in ASSETS.keys():
+        result = calculate_bias_for_asset(display_name)
+        results[display_name] = result
+
+        if result.get("status") == "SUCCESS":
+            price_str = f"{result['latest_close']:.4f}" if display_name in FOREX_PAIRS else f"${result['latest_close']:,.2f}"
+            print(f"{display_name:8} | Price: {price_str:12} | {result['direction']:8} | Prob: {result['probability']:5.1f}% | Conf: {result['confidence']:5.1f}%")
+        else:
+            print(f"{display_name:8} | ❌ {result.get('message', 'No data')}")
+
+    print("=" * 60)
+    return results
+
+
+if __name__ == "__main__":
+    run_bias_engine()
