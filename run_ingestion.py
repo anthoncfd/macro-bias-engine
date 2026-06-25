@@ -1,7 +1,7 @@
 """
-MACRO BIAS ENGINE - Main Ingestion Pipeline (V2.3 - Error Proof Type Checking)
-Uses direct Yahoo API for historical assets and TradingView for metals backfilling.
-Automatically calculates required calendar windows and normalizes varying price payload types.
+MACRO BIAS ENGINE - Main Ingestion Pipeline (V3.0)
+Uses direct, authenticated Twelve Data flows alongside targeted Yahoo Cash-Spot historical endpoints.
+Automatically adjusts lookback windows to handle tracking calculations over weekends.
 """
 import sys
 import os
@@ -15,22 +15,17 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from src.database.supabase_client import get_supabase_client
 from src.ingestion.market_prices import fetch_all_prices, FOREX_PAIRS, ASSETS
 
-# Global Target Metrics
 TARGET_MARKET_HISTORY = 60  
-SMA_WINDOW = 20
 MIN_REQUIRED_SESSIONS = 25  
 
 def calculate_required_calendar_days(target_trading_days):
-    """
-    Dynamically scales trading days to calendar days to absorb weekend market closures.
-    """
+    """Dynamically scales calendar days to clear weekend market drops."""
     weeks = (target_trading_days // 5) + 1
     weekend_days = weeks * 2
     return target_trading_days + weekend_days + 5
 
-# ─── Direct Yahoo API (No yfinance tracking layer) ───────────────────
 def fetch_historical_yahoo(ticker, start_date, end_date):
-    """Fetch daily OHLC from Yahoo direct API with browser-grade headers."""
+    """Fetch daily OHLC from Yahoo direct API using standard tracking nodes."""
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
     params = {
         "period1": int(start_date.timestamp()),
@@ -38,9 +33,7 @@ def fetch_historical_yahoo(ticker, start_date, end_date):
         "interval": "1d",
         "events": "history"
     }
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
         r = requests.get(url, headers=headers, params=params, timeout=10)
         if r.status_code != 200:
@@ -61,46 +54,21 @@ def fetch_historical_yahoo(ticker, start_date, end_date):
         print(f"   ⚠️ Yahoo API error for {ticker}: {e}")
         return None
 
-# ─── TradingView Historical Fetcher ──────────────────────────────────
-def fetch_historical_metal_spot(symbol="XAUUSD", exchange="OANDA", count=40):
-    """Fetches clean historical data arrays using the open TradingView proxy."""
-    tv_ticker = f"{exchange.upper()}:{symbol.upper()}"
-    url = "https://chartapi.tradingview.com/v1/history"
-    params = {"symbol": tv_ticker, "resolution": "D", "count": count}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "Referer": "https://www.tradingview.com/"
-    }
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=10)
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        timestamps = data.get("t", [])
-        closes = data.get("c", [])
-        
-        if not closes or not timestamps:
-            return None
-            
-        valid_records = []
-        for ts, close_val in zip(timestamps, closes):
-            if ts is not None and close_val is not None:
-                date_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
-                valid_records.append({"date": date_str, "close": float(close_val)})
-                
-        if not valid_records:
-            return None
-            
-        return pd.DataFrame(valid_records)
-    except Exception as e:
-        print(f"   ⚠️ Metal historical backend calculation error: {e}")
+def fetch_historical_metal_spot(symbol, count=40):
+    """Fetches historical cash SPOT metal arrays via Yahoo cash indices."""
+    spot_ticker_map = {"XAUUSD": "XAUUSD=X", "XAGUSD": "XAGUSD=X"}
+    ticker = spot_ticker_map.get(symbol)
+    if not ticker:
         return None
+        
+    end_date = datetime.now(timezone.utc)
+    start_date = end_date - timedelta(days=int(count * 1.6) + 5)
+    return fetch_historical_yahoo(ticker, start_date, end_date)
 
 def run_backfill(required_trading_days):
-    """Backfills history by automatically calculating the necessary calendar offset."""
+    """Automated database asset layer padding routine."""
     calendar_days_back = calculate_required_calendar_days(required_trading_days)
-    
-    print(f"\n📥 AUTOMATED BACKFILL: Requesting {calendar_days_back} calendar days to capture {required_trading_days} trading sessions...")
+    print(f"\n📥 AUTOMATED BACKFILL: Syncing {calendar_days_back} calendar days...")
     supabase = get_supabase_client()
     end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=calendar_days_back)
@@ -110,20 +78,17 @@ def run_backfill(required_trading_days):
         print(f"\n📊 Processing {display_name}...")
 
         if display_name in ["XAUUSD", "XAGUSD"]:
-            df = fetch_historical_metal_spot(display_name, exchange="OANDA", count=required_trading_days + 10)
-            if df is None or df.empty:
-                print(f"   ⚠️ No historical spot data extracted for {display_name}.")
-                continue
+            df = fetch_historical_metal_spot(display_name, count=required_trading_days + 10)
         else:
             df = None
-            for ticker in tickers:
+            for ticker in tickers if isinstance(tickers, list) else [tickers]:
                 df = fetch_historical_yahoo(ticker, start_date, end_date)
                 if df is not None and not df.empty:
-                    print(f"   ✅ Using ticker: {ticker}")
                     break
-            if df is None or df.empty:
-                print(f"   ❌ No data for {display_name}")
-                continue
+
+        if df is None or df.empty:
+            print(f"   ❌ No history recovered for {display_name}")
+            continue
 
         for _, row in df.iterrows():
             date_str = row["date"]
@@ -149,17 +114,15 @@ def run_backfill(required_trading_days):
             try:
                 supabase.table("market_structure_logs").insert(row_data).execute()
                 total_inserted += 1
-                print(f"   📅 {date_str}: {price}")
             except Exception as e:
                 print(f"   ❌ Insert failed: {e}")
-            time.sleep(0.05)
-        time.sleep(0.2)
+            time.sleep(0.02)
 
     print(f"\n✅ Backfill complete! Inserted {total_inserted} rows.")
     return total_inserted
 
 def get_database_state():
-    """Returns a dictionary containing the active history counts for every tracked asset."""
+    """Validates records across all assets."""
     state = {}
     try:
         supabase = get_supabase_client()
@@ -172,7 +135,7 @@ def get_database_state():
             state[display_name] = count
         return state
     except Exception as e:
-        print(f"   ⚠️ Database capacity validation failure: {e}")
+        print(f"   ⚠️ Database state validation failure: {e}")
         return {name: 0 for name in ASSETS.keys()}
 
 def run_pipeline():
@@ -181,86 +144,58 @@ def run_pipeline():
     print(f"📅 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
     print("=" * 55)
 
-    print("\n🔍 Checking database state for distinct session logs...")
     db_state = get_database_state()
-    
     lowest_session_count = min(db_state.values()) if db_state else 0
-    print(f"   📊 Current asset history depths: {db_state}")
-    print(f"   📉 Minimum available history across assets: {lowest_session_count} trading days.")
+    print(f"   📉 Minimum available asset metrics: {lowest_session_count} trading days.")
 
     if lowest_session_count < MIN_REQUIRED_SESSIONS:
         sessions_needed = TARGET_MARKET_HISTORY - lowest_session_count
-        print(f"\n⚠️ Database needs history. Automatically requesting a {sessions_needed}-session fill...")
         run_backfill(required_trading_days=sessions_needed)
     else:
-        print("\n✅ Database has sufficient history. Skipping backfill.")
+        print("\n✅ Sufficient database cache verified.")
 
-    print("\n⏳ Waiting 3 seconds...")
-    time.sleep(3)
-
-    print("\n📊 Fetching live market data...")
+    print("\n📊 Pulling Live Production Feed via Twelve Data...")
     raw_prices = fetch_all_prices()
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    # Type Normalizer Processing Layer
     normalized_prices = {}
     for name in ASSETS.keys():
         item = raw_prices.get(name)
-        
         if item is None:
             normalized_prices[name] = None
         elif isinstance(item, dict):
-            # Already matches standard data shape dictionary payload
-            normalized_prices[name] = {
-                "price": item.get("price"),
-                "date": item.get("date", today_str)
-            }
+            normalized_prices[name] = {"price": item.get("price"), "date": today_str}
         elif isinstance(item, (int, float)):
-            # Normalize naked numbers cleanly to unified formats
-            normalized_prices[name] = {
-                "price": float(item),
-                "date": today_str
-            }
-        else:
-            normalized_prices[name] = None
+            normalized_prices[name] = {"price": float(item), "date": today_str}
 
     print("\n📊 Market Snapshot:")
     for name, item in normalized_prices.items():
         if item is None or item.get("price") is None:
-            print(f"   ❌ {name:10} : No data")
+            print(f"   ❌ {name:10} : Out of Service")
         else:
             price = item["price"]
-            if name in FOREX_PAIRS:
-                print(f"   ✅ {name:10} : {price:.4f}")
-            else:
-                print(f"   ✅ {name:10} : ${price:,.2f}")
+            print(f"   ✅ {name:10} : {price:.4f}" if name in FOREX_PAIRS else f"   ✅ {name:10} : ${price:,.2f}")
 
-    print("\n🔌 Connecting to Supabase...")
+    print("\n🔌 Synchronizing Live Records with Supabase Storage Backend...")
     try:
         supabase = get_supabase_client()
-        print("   ✅ Connection successful!")
     except Exception as e:
-        print(f"   ❌ Connection failed: {e}")
+        print(f"   ❌ Database stack authentication mapping fatal exception: {e}")
         return
 
-    print("\n📤 Syncing today's closes...")
     inserted_count = 0
-
     for name, item in normalized_prices.items():
         if item is None or item.get("price") is None:
             continue
-            
         price_val = item["price"]
-        log_date = item["date"]
         
         dup_check = supabase.table("market_structure_logs") \
             .select("id") \
             .eq("ticker", name) \
-            .eq("created_at", log_date) \
+            .eq("created_at", today_str) \
             .execute()
-            
         if dup_check.data:
-            print(f"   ⚪ {name} already recorded for date ({log_date}).")
+            print(f"   ⚪ {name} current for today.")
             continue
             
         row = {
@@ -268,27 +203,23 @@ def run_pipeline():
             "latest_close": float(price_val),
             "trend": "NEUTRAL",
             "momentum_score": 0.0,
-            "created_at": log_date
+            "created_at": today_str
         }
         try:
             supabase.table("market_structure_logs").insert(row).execute()
-            print(f"   ✅ Inserted {name}")
             inserted_count += 1
         except Exception as e:
-            print(f"   ❌ Failed {name}: {e}")
+            print(f"   ❌ Failed to sync {name}: {e}")
 
-    print(f"\n📊 Inserted {inserted_count} assets today")
-
+    print(f"   📥 Live Pipeline processed [{inserted_count}] records.")
     print("\n" + "=" * 55)
-    print("🧠 RUNNING BIAS ENGINE")
+    print("🧠 RUNNING BIAS ENGINE CORE ANALYSIS")
     print("=" * 55)
     try:
         from src.analytics.bias_engine import run_bias_engine
         run_bias_engine()
     except Exception as e:
-        print(f"❌ Bias Engine error: {e}")
-
-    print("\n✅ PIPELINE COMPLETE")
+        print(f"❌ Bias Engine execution error: {e}")
 
 if __name__ == "__main__":
     run_pipeline()
