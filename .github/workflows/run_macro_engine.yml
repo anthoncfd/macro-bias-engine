@@ -2,12 +2,18 @@ name: Macro Bias Engine - Daily Pipeline
 
 on:
   schedule:
-    # 22:10 UTC: Ingestion (NY Market Close + 10 min)
+    # Runs at 22:10 UTC, Monday to Friday (NY Market Close + 10 min settlement)
     - cron: '10 22 * * 1-5'
-    # 22:20 UTC: Outcome Resolution (after ingestion completes)
+    # Outcome resolution runs after ingestion
     - cron: '20 22 * * 1-5'
   workflow_dispatch:
-    # Manual trigger - no input needed (auto-backfill handles empty DB)
+    # Manual trigger with optional backfill
+    inputs:
+      backfill_days:
+        description: 'Number of days to backfill (0 = normal run)'
+        required: false
+        default: '0'
+        type: number
 
 jobs:
   # ==========================================
@@ -27,12 +33,14 @@ jobs:
 
       - name: Install dependencies
         run: |
+          pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Run ingestion pipeline
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          BACKFILL_DAYS: ${{ github.event.inputs.backfill_days }}
         run: |
           python run_ingestion.py
 
@@ -54,6 +62,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Run outcome resolver
