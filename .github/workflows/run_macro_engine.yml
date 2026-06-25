@@ -1,4 +1,4 @@
-Name: Macro Bias Engine - Daily Pipeline
+name: Macro Bias Engine - Daily Pipeline
 
 on:
   schedule:
@@ -35,13 +35,13 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Run ingestion pipeline
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }} # Added for authenticated spot fetching
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
           BACKFILL_DAYS: ${{ github.event.inputs.backfill_days }}
         run: |
           python run_ingestion.py
@@ -66,7 +66,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install -r requirements.txt
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       - name: Run outcome resolver
         env:
