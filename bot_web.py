@@ -1,156 +1,192 @@
 """
-MACRO BIAS ENGINE - Web Entrypoint & Background Polling Daemon
-Runs a lightweight Flask web loop for platform monitoring bindings,
-alongside an asynchronous background thread driving the Telegram event stream.
+MACRO BIAS ENGINE - Telegram Bot with Live Price Support
+Shows both current live price and daily close.
 """
-import asyncio
-import logging
 import os
+import sys
+import logging
 import threading
+import asyncio
+import time
 from flask import Flask
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
+# ============================================
+# LOGGING
+# ============================================
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-web_app = Flask(__name__)
+# ============================================
+# PATH SETUP
+# ============================================
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+if REPO_ROOT not in sys.path:
+    sys.path.append(REPO_ROOT)
 
-@web_app.route("/")
-def health_check():
-    return "MACRO_BIAS_ENGINE_ALIVE", 200
+# ============================================
+# TELEGRAM TOKEN
+# ============================================
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+if not TOKEN:
+    logger.error("❌ TELEGRAM_BOT_TOKEN not set!")
+    sys.exit(1)
 
-@web_app.route("/health")
-def internal_health():
-    return {"status": "healthy", "engine": "active"}, 200
+# ============================================
+# FLASK APP (Keep‑alive for Render)
+# ============================================
+flask_app = Flask(__name__)
 
-def generate_help_markdown() -> str:
-    msg = (
-        "🤖 *MACRO BIAS ENGINE DIRECTORY*\n"
-        "‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n"
-        "Query quantitative asset deviation statistics using the following handles:\n\n"
-        "💱 *Forex Pairs:*\n"
-        "• `/eurusd` | `/gbpusd` | `/audusd` \n"
-        "• `/eurjpy` | `/gbpjpy` | `/cadjpy` | `/cadchf` \n\n"
-        "🪙 *Commodities & Crypto:*\n"
-        "• `/xauusd` _(Spot Gold)_\n"
-        "• `/xagusd` _(Spot Silver)_\n"
-        "• `/btcusd` _(Bitcoin Context)_\n\n"
-        "📈 *Equity Indices:*\n"
-        "• `/us30` | `/jp225` \n\n"
-        "⚙️ *System Macros:*\n"
-        "• `/bias [ticker]` — Run an arbitrary pair custom evaluation\n"
-        "• `/help` — Output this active documentation matrix"
+@flask_app.route('/')
+def home():
+    return "🤖 Macro Bias Bot is running with Live Prices!"
+
+@flask_app.route('/health')
+def health():
+    return "OK", 200
+
+@flask_app.route('/ping')
+def ping():
+    return "Pong", 200
+
+# ============================================
+# IMPORTS (Lazy load)
+# ============================================
+def get_engine():
+    try:
+        from src.analytics.bias_engine import calculate_bias_for_asset, run_bias_engine
+        from src.ingestion.market_prices import ASSETS, FOREX_PAIRS, fetch_live_price
+        return calculate_bias_for_asset, run_bias_engine, ASSETS, FOREX_PAIRS, fetch_live_price
+    except ImportError as e:
+        logger.error(f"❌ Import failed: {e}")
+        return None, None, None, None, None
+
+calc_bias, run_bias, ASSETS, FOREX_PAIRS, fetch_live = get_engine()
+
+# ============================================
+# TELEGRAM HANDLERS
+# ============================================
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🏛️ **MACRO BIAS ENGINE**\n\n"
+        "Send a ticker like `/eurusd`, `/gold`, `/btc`\n"
+        "or just type `EURUSD`.\n\n"
+        "Shows **Live Price** + **Close Price** + bias metrics.",
+        parse_mode="Markdown"
     )
-    return msg
 
-def generate_telegram_markdown(ticker: str, data: dict) -> str:
-    direction_emoji = "🟢 BULLISH" if data["direction"] == "BULLISH" else "🔴 BEARISH" if data["direction"] == "BEARISH" else "⚪ NEUTRAL"
+async def asset_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw = update.message.text
+    ticker = raw.replace("/", "").strip().upper()
+    logger.info(f"📩 Received: '{raw}' → {ticker}")
 
-    msg = (
-        f"📊 *MACRO PROFILE: {ticker}*\n"
-        f"📅 _As of: {data['last_update'][:19].replace('T', ' ')}_\n"
-        f"‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\n"
-        f"💵 *Current Price:* {data['latest_close']:.4f}\n"
-        f"📉 *20-Day SMA:* {data['sma_20']:.4f}\n"
-        f"🎚️ *Z-Score Boundary:* {data['z_score']:.2f}\n"
-        f"🚀 *Momentum Velocity:* {data['momentum_pct']:+.2f}%\n\n"
-        f"🤖 *Engine Direction:* {direction_emoji}\n"
-        f"🎯 *Directional Score:* {data['directional_score']:.1f}/100\n"
-        f"⚡ *Signal Strength Rank:* {data['signal_strength']:.1f}%\n"
-        f"🛡️ *System Conviction:* {data.get('conviction', 'LOW')}\n"
-    )
-    return msg
-
-async def handle_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(generate_help_markdown(), parse_mode="Markdown")
-
-async def handle_bias_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Processes asset requests by pulling true live market price arrays dynamically."""
-    user_input = " ".join(context.args).upper().strip() if context.args else ""
-    
-    if not user_input and update.message and update.message.text:
-        raw_cmd = update.message.text.split()[0].lower()
-        if len(raw_cmd) > 1:
-            user_input = raw_cmd[1:].upper()
-
-    if not user_input or user_input == "BIAS":
-        await update.message.reply_text("⚠️ Please pass a valid asset ticker. (Example: `/bias XAUUSD`)", parse_mode="Markdown")
+    if calc_bias is None or ASSETS is None:
+        await update.message.reply_text("❌ Engine not loaded. Check logs.")
         return
 
-    try:
-        from src.analytics.bias_engine import calculate_bias_for_asset
-        from src.ingestion.market_prices import fetch_live_feed_price 
-        
-        await update.message.reply_chat_action("typing")
-        
-        # 1. Safely handle multi-type dictionary or float payload responses from the price utility
-        raw_feed_response = fetch_live_feed_price(user_input) 
-        if isinstance(raw_feed_response, dict):
-            live_spot_price = float(raw_feed_response.get(user_input, 0) or raw_feed_response.get("price", 0))
-        else:
-            live_spot_price = float(raw_feed_response)
-            
-        if live_spot_price == 0:
-            raise ValueError(f"Extracted valuation for ticker {user_input} resolved to invalid 0 value baseline.")
-        
-        # 2. Compute dynamic metrics via direct structural override injections
-        metrics = calculate_bias_for_asset(user_input, live_price_override=live_spot_price)
-        
-        if metrics.get("status") == "SUCCESS":
-            formatted_text = generate_telegram_markdown(user_input, metrics)
-            await update.message.reply_text(formatted_text, parse_mode="Markdown")
-        elif metrics.get("status") == "SKIP" or metrics.get("status") == "ERROR":
-            await update.message.reply_text(f"❌ Processing fault: {metrics.get('message')}")
-        else:
-            await update.message.reply_text(f"🔍 Ticker '{user_input}' could not be resolved by the matrix.")
-            
-    except Exception as e:
-        logger.error(f"Telegram execution exception context: {e}", exc_info=True)
-        await update.message.reply_text("💥 Internal processor calculation exception occurred.")
+    if ticker not in ASSETS:
+        if raw.startswith("/"):
+            await update.message.reply_text(f"❌ `{ticker}` not tracked.", parse_mode="Markdown")
+        return
 
-def run_telegram_bot():
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    if not token:
-        critical_error = "CRITICAL RUNTIME ERROR: TELEGRAM_BOT_TOKEN environment variable is missing!"
-        logger.critical(critical_error)
-        raise RuntimeError(critical_error)
+    await update.message.reply_chat_action("typing")
+
+    try:
+        # 1. Get bias metrics (closing‑price based)
+        metrics = calc_bias(ticker)
+        if metrics.get("status") != "SUCCESS":
+            await update.message.reply_text(
+                f"⚠️ Insufficient data for {ticker}: {metrics.get('message')}",
+                parse_mode="Markdown"
+            )
+            return
+
+        # 2. Fetch live price (on‑demand)
+        live_price = None
+        if fetch_live:
+            live_price = fetch_live(ASSETS[ticker])
+
+        # 3. Format response
+        direction = metrics["direction"]
+        emoji = "🟢" if direction == "BULLISH" else "🔴" if direction == "BEARISH" else "⚪"
+        is_forex = ticker in FOREX_PAIRS if FOREX_PAIRS else False
+
+        close_fmt = f"{metrics['latest_close']:.4f}" if is_forex else f"${metrics['latest_close']:,.2f}"
+        live_fmt = f"{live_price:.4f}" if live_price and is_forex else f"${live_price:,.2f}" if live_price else "N/A"
+
+        report = (
+            f"📊 **MACRO PROFILE: {ticker}**\n"
+            f"📅 _As of: {metrics.get('last_update', 'N/A')}_\n\n"
+            f"💵 **Live Price:** `{live_fmt}`\n"
+            f"💵 **Close Price:** `{close_fmt}`\n"
+            f"📉 **20‑Day SMA:** `{close_fmt}`\n"
+            f"🎚️ **Z‑Score:** `{metrics['z_score']:+.2f}`\n"
+            f"🚀 **Momentum:** `{metrics['momentum_pct']:+.2f}%`\n\n"
+            f"🤖 **Bias:** {emoji} `{direction}`\n"
+            f"🎯 **Probability:** `{metrics['probability']:.1f}%`\n"
+            f"🛡️ **Confidence:** `{metrics['confidence']:.1f}%`"
+        )
+        await update.message.reply_text(report, parse_mode="Markdown")
+        logger.info(f"✅ Sent report for {ticker}")
+
+    except Exception as e:
+        logger.error(f"❌ Error processing {ticker}: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+async def bias_matrix(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Generating full matrix...")
+    if run_bias is None:
+        await update.message.reply_text("❌ Engine not loaded.")
+        return
+    try:
+        results = run_bias()
+        report = "🏛️ **MACRO BIAS MATRIX**\n\n"
+        for ticker, data in results.items():
+            if data.get("status") == "SUCCESS":
+                emoji = "🟢" if data["direction"] == "BULLISH" else "🔴" if data["direction"] == "BEARISH" else "⚪"
+                report += f"{emoji} {ticker}: {data['direction']} ({data['probability']:.0f}%)\n"
+            else:
+                report += f"⚪ {ticker}: {data.get('message', 'No data')}\n"
+        await update.message.reply_text(report, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Matrix error: {e}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+# ============================================
+# TELEGRAM BOT THREAD
+# ============================================
+
+def run_bot():
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("help", start_command))
+    app.add_handler(CommandHandler("bias", bias_matrix))
     
+    # Register asset commands and text handler
+    if ASSETS:
+        for asset in ASSETS.keys():
+            app.add_handler(CommandHandler(asset.lower(), asset_handler))
+    
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), asset_handler))
+    app.add_handler(MessageHandler(filters.COMMAND, asset_handler))
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    
-    app = ApplicationBuilder().token(token).build()
-    
-    app.add_handler(CommandHandler("help", handle_help_command))
-    app.add_handler(CommandHandler("bias", handle_bias_command))
-    app.add_handler(CommandHandler("gbpusd", handle_bias_command))
-    app.add_handler(CommandHandler("eurusd", handle_bias_command))
-    app.add_handler(CommandHandler("eurjpy", handle_bias_command))
-    
-    for asset in ["AUDUSD", "GBPJPY", "CADJPY", "CADCHF", "XAUUSD", "XAGUSD", "BTCUSD", "JP225", "US30"]:
-        app.add_handler(CommandHandler(asset.lower(), handle_bias_command))
+    logger.info("🤖 Telegram bot started with Live Price support!")
+    loop.run_until_complete(app.run_polling())
 
-    logger.info("🤖 Polling engine fully active. Overriding competing handles...")
-    
-    loop.run_until_complete(app.initialize())
-    loop.run_until_complete(app.updater.start_polling(drop_pending_updates=True))
-    loop.run_until_complete(app.start())
-    
-    try:
-        loop.run_forever()
-    except (KeyboardInterrupt, SystemExit):
-        pass
-    finally:
-        loop.run_until_complete(app.stop())
-        loop.run_until_complete(app.shutdown())
-        loop.close()
+# ============================================
+# MAIN
+# ============================================
 
 if __name__ == "__main__":
-    bot_thread = threading.Thread(target=run_telegram_bot, daemon=True)
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
-    
     port = int(os.environ.get("PORT", 10000))
-    logger.info(f"📡 Web routing framework initializing server loop on port: {port}")
-    web_app.run(host="0.0.0.0", port=port, debug=False)
+    logger.info(f"🚀 Flask server on port {port}")
+    flask_app.run(host="0.0.0.0", port=port)
