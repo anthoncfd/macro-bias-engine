@@ -1,5 +1,5 @@
 """
-MACRO BIAS ENGINE - Telegram Bot (with Live Price)
+MACRO BIAS ENGINE - Telegram Bot (with Live Price & Data Source)
 """
 import os
 import sys
@@ -71,7 +71,8 @@ if calc is None:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🏛️ **MACRO BIAS ENGINE**\n\n"
-        "Send /eurusd or just type EURUSD",
+        "Send /eurusd or just type EURUSD\n"
+        "Data source: Yahoo Finance (adjusted close)",
         parse_mode="Markdown"
     )
     logger.info(f"📱 /start from {update.effective_user.username}")
@@ -103,12 +104,13 @@ async def asset_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ─── Fetch Live Price ──────────────────────────────────────────
         live_price = None
+        live_source = "❌ Unavailable"
         if fetch_live:
             tickers = ASSETS.get(ticker, [])
             if tickers:
                 live_price = fetch_live(tickers)
                 if live_price:
-                    logger.info(f"📡 Live price for {ticker}: {live_price}")
+                    live_source = "Yahoo 1m (intraday)"
 
         # ─── Formatting ────────────────────────────────────────────────
         is_fx = ticker in FOREX if FOREX else False
@@ -119,8 +121,10 @@ async def asset_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         reply = (
             f"📊 **MACRO PROFILE: {ticker}**\n"
-            f"📅 As of: {metrics.get('last_update', 'N/A')}\n\n"
+            f"📅 As of: {metrics.get('last_update', 'N/A')}\n"
+            f"📡 Source: Yahoo Finance (adjusted close)\n\n"
             f"💰 **Live Price:** `{live_str}`\n"
+            f"   _({live_source})_\n"
             f"💵 **Close:** `{close_str}`\n"
             f"📉 **20‑Day SMA:** `{sma_str}`\n"
             f"🎚️ **Z‑Score:** `{metrics['z_score']:+.2f}`\n"
