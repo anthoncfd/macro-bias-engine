@@ -6,16 +6,12 @@ import time
 import random
 
 def fetch_macro_data():
-    """
-    Fetches all macro indicators and calculates Z-scores.
-    """
+    """Fetches macro indicators: DXY, VIX, 10Y yield."""
     macro_tickers = {
         "dxy": "DX-Y.NYB",
         "vix": "^VIX",
-        "us2y": "^IRX",
         "us10y": "^TNX"
     }
-    
     results = {}
     
     for name, ticker in macro_tickers.items():
@@ -38,20 +34,8 @@ def fetch_macro_data():
                         results[name] = None
             else:
                 results[name] = None
-        except:
+        except Exception as e:
             results[name] = None
-        
         time.sleep(random.uniform(0.3, 0.5))
-    
-    # Calculate spread
-    if results.get("us10y") and results.get("us2y"):
-        results["spread"] = results["us10y"] - results["us2y"]
-    else:
-        results["spread"] = None
-    
-    # Z-scores (simplified, would normally use rolling means)
-    results["dxy_z"] = (results.get("dxy", 100) - 103) / 3
-    results["vix_z"] = (results.get("vix", 20) - 18) / 5
-    results["spread_z"] = (results.get("spread", 0.5) - 0.3) / 0.2
     
     return results
