@@ -77,12 +77,10 @@ def fetch_asset_history(display_name):
 
 def calculate_bias_for_asset(display_name):
     """Calculate bias using TradingView for metals, fallback to Supabase."""
-    # Try TradingView for metals
     if display_name in ["XAUUSD", "XAGUSD"]:
         exchange = TV_EXCHANGE_MAP.get(display_name, "OANDA")
         latest_close, latest_date, sma_20 = fetch_20_sma_from_tradingview(display_name, exchange)
         if latest_close is not None and sma_20 is not None:
-            # TradingView succeeded – use it, but still need std from history
             df = fetch_asset_history(display_name)
             if len(df) < MIN_DATA_POINTS:
                 return {
@@ -103,7 +101,6 @@ def calculate_bias_for_asset(display_name):
             z_score = (latest_close - sma_20) / latest_std if latest_std > 0 else 0.0
             momentum_pct = ((latest_close - prev_close) / prev_close) * 100 if prev_close != 0 else 0.0
             
-            # Direction logic
             if latest_close > sma_20 and z_score > 0.3:
                 direction = "BULLISH"
             elif latest_close < sma_20 and z_score < -0.3:
@@ -128,7 +125,6 @@ def calculate_bias_for_asset(display_name):
                 "last_update": latest_date
             }
         else:
-            # TradingView failed → fallback to Supabase
             logger.warning(f"TradingView failed for {display_name}, falling back to Supabase.")
 
     # ─── Common Supabase path (for non‑metals or fallback) ──────────
