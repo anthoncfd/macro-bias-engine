@@ -1,86 +1,131 @@
 """
 MACRO BIAS ENGINE - Main Ingestion Pipeline
-Auto-backfills if database is empty, then runs daily ingestion.
-Prevents duplicate rows for the same day.
-Gold & Silver: uses GoldPrice.Today for daily close (spot).
-Other assets: Yahoo daily close.
+Uses direct Yahoo API for historical assets and TradingView for metals backfilling.
 """
 import sys
 import os
 import time
-import yfinance as yf
+import requests
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from src.database.supabase_client import get_supabase_client
 from src.ingestion.market_prices import fetch_all_prices, FOREX_PAIRS, ASSETS
-from src.ingestion.metals_spot_fetcher import fetch_metal_spots
 
-def run_backfill(days_back=10):
-    """Backfill historical data into Supabase."""
-    print(f"\n📥 BACKFILLING {days_back} days of historical data...")
-    print("=" * 55)
-    
+# ─── Direct Yahoo API (No yfinance tracking layer) ───────────────────
+def fetch_historical_yahoo(ticker, start_date, end_date):
+    """Fetch daily OHLC from Yahoo direct API with browser-grade headers."""
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+    params = {
+        "period1": int(start_date.timestamp()),
+        "period2": int(end_date.timestamp()),
+        "interval": "1d",
+        "events": "history"
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        result = data.get("chart", {}).get("result", [None])[0]
+        if not result:
+            return None
+        timestamps = result.get("timestamp", [])
+        closes = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+        valid = [(t, c) for t, c in zip(timestamps, closes) if t is not None and c is not None]
+        if not valid:
+            return None
+        df = pd.DataFrame(valid, columns=["timestamp", "close"])
+        df["date"] = pd.to_datetime(df["timestamp"], unit="s").dt.strftime("%Y-%m-%d")
+        return df[["date", "close"]]
+    except Exception as e:
+        print(f"   ⚠️ Yahoo API error for {ticker}: {e}")
+        return None
+
+# ─── Fixed TradingView Historical Fetcher (Replacing Dead Sites) ───────
+def fetch_historical_metal_spot(symbol="XAUUSD", exchange="OANDA", count=40):
+    """Fetches clean historical data arrays using the open TradingView proxy."""
+    tv_ticker = f"{exchange.upper()}:{symbol.upper()}"
+    url = "https://chartapi.tradingview.com/v1/history"
+    params = {"symbol": tv_ticker, "resolution": "D", "count": count}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Referer": "https://www.tradingview.com/"
+    }
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        timestamps = data.get("t", [])
+        closes = data.get("c", [])
+        
+        if not closes or not timestamps:
+            return None
+            
+        valid_records = []
+        for ts, close_val in zip(timestamps, closes):
+            if ts is not None and close_val is not None:
+                date_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+                valid_records.append({"date": date_str, "close": float(close_val)})
+                
+        if not valid_records:
+            return None
+            
+        return pd.DataFrame(valid_records)
+    except Exception as e:
+        print(f"   ⚠️ Metal historical backend calculation error: {e}")
+        return None
+
+def run_backfill(days_back=20):
+    """Backfill historical data using direct APIs."""
+    print(f"\n📥 BACKFILLING {days_back} days...")
     supabase = get_supabase_client()
-    end_date = datetime.now()
+    end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=days_back)
     total_inserted = 0
-    
+
     for display_name, tickers in ASSETS.items():
         print(f"\n📊 Processing {display_name}...")
-        df = None
-        # For gold and silver, we can't backfill with Yahoo; skip or use API.
-        # We'll rely on the daily ingestion to build history.
+
+        # ─── Metals: use clean TradingView historical maps ────────────
         if display_name in ["XAUUSD", "XAGUSD"]:
-            print(f"   ⚠️ {display_name} uses spot API – skipping backfill (data will accumulate daily).")
-            continue
-        
-        for ticker in tickers:
-            try:
-                df = yf.download(
-                    ticker,
-                    start=start_date.strftime("%Y-%m-%d"),
-                    end=end_date.strftime("%Y-%m-%d"),
-                    interval="1d",
-                    progress=False,
-                    auto_adjust=True
-                )
-                if not df.empty:
+            df = fetch_historical_metal_spot(display_name, exchange="OANDA", count=days_back + 10)
+            if df is None or df.empty:
+                print(f"   ⚠️ No historical spot data extracted for {display_name}.")
+                continue
+        # ─── Others: use Yahoo direct API ──────────────────────────
+        else:
+            df = None
+            for ticker in tickers:
+                df = fetch_historical_yahoo(ticker, start_date, end_date)
+                if df is not None and not df.empty:
                     print(f"   ✅ Using ticker: {ticker}")
                     break
-            except Exception as e:
-                print(f"   ⚠️ Ticker {ticker} failed: {e}")
+            if df is None or df.empty:
+                print(f"   ❌ No data for {display_name}")
                 continue
-        
-        if df is None or df.empty:
-            print(f"   ❌ No data found for {display_name}")
-            continue
-        
-        for date_idx, row in df.iterrows():
-            try:
-                price = row['Close']
-                if isinstance(price, pd.Series):
-                    price = price.iloc[0]
-                price = float(price)
-            except:
-                continue
-            
+
+        # ─── Insert rows cleanly to Supabase ─────────────────────────
+        for _, row in df.iterrows():
+            date_str = row["date"]
+            price = float(row["close"])
             if pd.isna(price):
                 continue
-            
-            date_str = date_idx.strftime("%Y-%m-%d")
-            
+
             check = supabase.table("market_structure_logs") \
                 .select("id") \
                 .eq("ticker", display_name) \
                 .eq("created_at", date_str) \
                 .execute()
-            
             if check.data:
                 continue
-            
+
             row_data = {
                 "ticker": display_name,
                 "latest_close": price,
@@ -88,72 +133,67 @@ def run_backfill(days_back=10):
                 "momentum_score": 0.0,
                 "created_at": date_str
             }
-            
             try:
                 supabase.table("market_structure_logs").insert(row_data).execute()
                 total_inserted += 1
                 print(f"   📅 {date_str}: {price}")
             except Exception as e:
                 print(f"   ❌ Insert failed: {e}")
-            
             time.sleep(0.05)
-        time.sleep(0.3)
-    
+        time.sleep(0.2)
+
     print(f"\n✅ Backfill complete! Inserted {total_inserted} rows.")
     return total_inserted
 
 def get_row_count():
-    """Get number of distinct daily close points in database."""
+    """Count distinct dates in the database."""
     try:
         supabase = get_supabase_client()
         result = supabase.table("market_structure_logs") \
             .select("created_at") \
             .order("created_at", desc=True) \
-            .limit(100) \
+            .limit(200) \
             .execute()
-        
         if not result.data:
             return 0
-            
-        dates = {row['created_at'].split('T')[0] for row in result.data}
+        dates = {row['created_at'][:10] for row in result.data if row.get('created_at')}
         return len(dates)
     except Exception as e:
         print(f"   ⚠️ Row count check failed: {e}")
         return 0
 
 def run_pipeline():
-    """Executes the complete pipeline synchronization process."""
     print("=" * 55)
     print("🚀 MACRO BIAS ENGINE - INGESTION PIPELINE")
-    print(f"📅 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"📅 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
     print("=" * 55)
 
-    print("\n🔍 Checking database for sufficient historical depth...")
     row_count = get_row_count()
-    print(f"   📊 Found {row_count} distinct daily points in database")
+    print(f"\n📊 Found {row_count} distinct dates in database.")
 
-    if row_count < 10:
-        days_needed = 10 - row_count
-        print(f"\n⚠️ Only {row_count} days of data. Backfilling {days_needed + 5} more days...")
-        run_backfill(days_back=days_needed + 5)
+    if row_count < 15:
+        days_needed = 20 - row_count
+        print(f"⚠️ Only {row_count} days. Backfilling {days_needed} days...")
+        run_backfill(days_back=days_needed)
     else:
-        print("\n✅ Database has sufficient history. Skipping backfill.")
+        print("✅ Sufficient history found.")
 
     print("\n⏳ Waiting 3 seconds...")
     time.sleep(3)
 
-    # ─── Fetch today's closes ────────────────────────────────────────
     print("\n📊 Fetching live market data...")
     prices = fetch_all_prices()
 
     print("\n📊 Market Snapshot:")
-    for name, price in prices.items():
-        if price is None:
+    for name, item in prices.items():
+        if item is None or item.get("price") is None:
             print(f"   ❌ {name:10} : No data")
-        elif name in FOREX_PAIRS:
-            print(f"   ✅ {name:10} : {price:.4f}")
         else:
-            print(f"   ✅ {name:10} : ${price:,.2f}")
+            price = item["price"]
+            if name in FOREX_PAIRS:
+                print(f"   ✅ {name:10} : {price:.4f}")
+            else:
+                print(f"   ✅ {name:10} : ${price:,.2f}")
 
     print("\n🔌 Connecting to Supabase...")
     try:
@@ -163,31 +203,28 @@ def run_pipeline():
         print(f"   ❌ Connection failed: {e}")
         return
 
-    print("\n📤 Syncing logs to 'market_structure_logs'...")
+    print("\n📤 Syncing today's closes...")
     inserted_count = 0
-    today_string = datetime.now().strftime("%Y-%m-%d")
-    
-    for name, price in prices.items():
-        if price is None:
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    for name, item in prices.items():
+        if item is None or item.get("price") is None:
             continue
-            
-        # ─── Check if today's close already exists ────────────────────
+        price_val = item["price"]
         dup_check = supabase.table("market_structure_logs") \
             .select("id") \
             .eq("ticker", name) \
-            .eq("created_at", today_string) \
+            .eq("created_at", today_str) \
             .execute()
-            
         if dup_check.data:
-            print(f"   ⚪ {name} already recorded for today ({today_string}). Skipping.")
+            print(f"   ⚪ {name} already recorded for today.")
             continue
-
         row = {
             "ticker": name,
-            "latest_close": float(price),
+            "latest_close": float(price_val),
             "trend": "NEUTRAL",
             "momentum_score": 0.0,
-            "created_at": today_string
+            "created_at": today_str
         }
         try:
             supabase.table("market_structure_logs").insert(row).execute()
@@ -199,18 +236,15 @@ def run_pipeline():
     print(f"\n📊 Inserted {inserted_count} assets today")
 
     print("\n" + "=" * 55)
-    print("🧠 RUNNING QUANTITATIVE BIAS ENGINE")
+    print("🧠 RUNNING BIAS ENGINE")
     print("=" * 55)
-    
     try:
         from src.analytics.bias_engine import run_bias_engine
         run_bias_engine()
     except Exception as e:
-        print(f"❌ Bias Engine execution crash: {e}")
+        print(f"❌ Bias Engine error: {e}")
 
-    print("\n" + "=" * 55)
-    print("✅ PIPELINE COMPLETE")
-    print("=" * 55)
+    print("\n✅ PIPELINE COMPLETE")
 
 if __name__ == "__main__":
     run_pipeline()
