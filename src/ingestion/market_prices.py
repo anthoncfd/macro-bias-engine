@@ -14,11 +14,12 @@ logger = logging.getLogger(__name__)
 # ==========================================
 
 ASSETS = {
-    "XAUUSD": ["GC=F", "XAUUSD=X"],          # Gold (Futures → Spot)
-    "XAGUSD": ["SI=F", "XAGUSD=X"],          # Silver (Futures → Spot)
-    "BTCUSD": ["BTC-USD"],                   # Bitcoin
-    "JP225": ["^N225"],                      # Nikkei 225
-    "US30": ["^DJI"],                        # Dow Jones
+    # 🔥 FIX: Spot ticker FIRST for Gold and Silver
+    "XAUUSD": ["XAUUSD=X", "GC=F"],          # Spot first, Futures fallback
+    "XAGUSD": ["XAGUSD=X", "SI=F"],          # Spot first, Futures fallback
+    "BTCUSD": ["BTC-USD"],
+    "JP225": ["^N225"],
+    "US30": ["^DJI"],
     "EURUSD": ["EURUSD=X"],
     "GBPUSD": ["GBPUSD=X"],
     "AUDUSD": ["AUDUSD=X"],
@@ -124,7 +125,6 @@ def fetch_adjusted_close(ticker, days_back=5):
                 closes = indicators.get("close", [])
                 timestamps = chart_data.get("timestamp", [])
                 if closes and timestamps:
-                    # Return the most recent NON-NULL close with its timestamp
                     for i in range(len(closes) - 1, -1, -1):
                         if closes[i] is not None:
                             return {
