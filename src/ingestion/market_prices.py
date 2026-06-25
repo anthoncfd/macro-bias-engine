@@ -1,11 +1,16 @@
 """
 MACRO BIAS ENGINE - Market Data Fetcher
 Uses direct Yahoo API with proper adjusted close and 1m live price fallback.
+For metals (XAUUSD, XAGUSD, XPTUSD, XPDUSD, XRHUSD), uses dedicated metals spot API.
 """
+import os
 import requests
 import time
 import random
 import logging
+
+# ─── Import the metals spot fetcher ────────────────────────────────────
+from src.ingestion.metals_spot_fetcher import fetch_metal_spots, METAL_SYMBOLS
 
 logger = logging.getLogger(__name__)
 
@@ -14,19 +19,24 @@ logger = logging.getLogger(__name__)
 # ==========================================
 
 ASSETS = {
-    # 🔥 FIX: Spot ticker FIRST for Gold and Silver
-    "XAUUSD": ["XAUUSD=X", "GC=F"],          # Spot first, Futures fallback
-    "XAGUSD": ["XAGUSD=X", "SI=F"],          # Spot first, Futures fallback
+    # Metals: spot tickers (will be overridden by metal API for live price)
+    "XAUUSD": ["XAUUSD=X", "GC=F"],          # Gold
+    "XAGUSD": ["XAGUSD=X", "SI=F"],          # Silver
+    "XPTUSD": ["XPTUSD=X", "PL=F"],          # Platinum
+    "XPDUSD": ["XPDUSD=X", "PA=F"],          # Palladium
+    "XRHUSD": ["XRHUSD=X", "RH=F"],          # Rhodium
+    # Crypto & Indices
     "BTCUSD": ["BTC-USD"],
     "JP225": ["^N225"],
     "US30": ["^DJI"],
+    # Forex
     "EURUSD": ["EURUSD=X"],
     "GBPUSD": ["GBPUSD=X"],
     "AUDUSD": ["AUDUSD=X"],
     "EURJPY": ["EURJPY=X"],
     "GBPJPY": ["GBPJPY=X"],
     "CADJPY": ["CADJPY=X"],
-    "CADCHF": ["CADCHF=X"]
+    "CADCHF": ["CADCHF=X"],
 }
 
 FOREX_PAIRS = ["EURUSD", "GBPUSD", "AUDUSD", "EURJPY", "GBPJPY", "CADJPY", "CADCHF"]
@@ -80,11 +90,24 @@ def fetch_all_prices():
 
 def fetch_live_price(tickers):
     """
-    Fetches current intraday price using Yahoo Finance.
-    Tries 1m first, falls back to 5m if 1m fails.
+    Fetches current intraday price.
+    For metals (XAUUSD, XAGUSD, XPTUSD, XPDUSD, XRHUSD), uses dedicated spot API.
+    For others, uses Yahoo Finance (1m → 5m fallback).
     """
+    # Check if any of the tickers are metals
+    metals_to_fetch = [t for t in tickers if t in METAL_SYMBOLS]
+    if metals_to_fetch:
+        api_key = os.environ.get("METALS_API_KEY")
+        all_metal_prices = fetch_metal_spots(api_key)
+        # Try to find a price for any of the requested metals
+        for metal in metals_to_fetch:
+            if metal in all_metal_prices and all_metal_prices[metal] is not None:
+                logger.info(f"📡 Live price from Metals-API: {metal} = {all_metal_prices[metal]}")
+                return all_metal_prices[metal]
+        # If no metal price found, fall through to Yahoo
+
+    # Fallback: Yahoo Finance for all assets (including metals if API failed)
     intervals = ["1m", "5m"]
-    
     for ticker in tickers:
         for interval in intervals:
             try:
@@ -100,7 +123,9 @@ def fetch_live_price(tickers):
                         closes = indicators.get("close", [])
                         valid_closes = [c for c in closes if c is not None]
                         if valid_closes:
-                            return float(valid_closes[-1])
+                            price = float(valid_closes[-1])
+                            logger.info(f"📡 Live price from {ticker} ({interval}): {price}")
+                            return price
             except:
                 pass
             time.sleep(0.2)
