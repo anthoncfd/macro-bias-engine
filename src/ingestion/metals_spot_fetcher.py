@@ -49,13 +49,10 @@ def fetch_historical_close(metal, days_back=60):
     Returns a list of dicts: [{"date": "2026-06-25", "close": 3983.44}, ...]
     """
     try:
-        # GoldPrice.Today API for historical data
-        # This endpoint returns closing prices for the last N days
         url = f"https://GoldPrice.Today/api.php?data=historical&metal={metal}&days={days_back}"
         response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
-            # The API returns data in format: {"data": [{"date": "...", "price": ...}, ...]}
             historical = []
             for entry in data.get("data", []):
                 historical.append({
