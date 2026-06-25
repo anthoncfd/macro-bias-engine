@@ -127,7 +127,7 @@ def fetch_live_price(tickers):
         live_prices = fetch_live_metal_spots()
         for metal in metals_to_fetch:
             if metal in live_prices and live_prices[metal] is not None:
-                logger.info(f"📡 Live {metal}: ${live_prices[metal]}")
+                logger.info(f"📡 Live {metal}: ${live_prices[metal]:.2f}")
                 return live_prices[metal]
         # If API failed, fall through to Yahoo
 
