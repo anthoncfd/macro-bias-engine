@@ -1,5 +1,5 @@
 """
-MACRO BIAS ENGINE - Telegram Bot (with Live Price & Data Source)
+MACRO BIAS ENGINE - Telegram Bot (Final, Robust)
 """
 import os
 import sys
@@ -11,17 +11,13 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # ─── Logging ──────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # ─── Path Setup ──────────────────────────────────────────────────────────
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 if REPO_ROOT not in sys.path:
     sys.path.append(REPO_ROOT)
-logger.info(f"📁 Repo root: {REPO_ROOT}")
 
 # ─── Token ──────────────────────────────────────────────────────────────
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -30,12 +26,21 @@ if not TOKEN:
     sys.exit(1)
 logger.info("✅ Token loaded")
 
-# ─── Flask App ──────────────────────────────────────────────────────────
+# ─── Import market_prices (with error handling) ──────────────────────
+try:
+    from src.ingestion.market_prices import ASSETS, FOREX_PAIRS, fetch_live_price
+    from src.analytics.bias_engine import calculate_bias_for_asset
+    logger.info("✅ market_prices and bias_engine loaded")
+except Exception as e:
+    logger.error(f"❌ Import failed: {e}", exc_info=True)
+    sys.exit(1)
+
+# ─── Flask App (keep‑alive) ───────────────────────────────────────────
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def home():
-    return "🤖 Macro Bias Bot is running!"
+    return "🤖 Bot is running"
 
 @flask_app.route('/health')
 def health():
@@ -47,48 +52,19 @@ def ping():
 
 @flask_app.route('/debug')
 def debug():
-    return jsonify({
-        "status": "running",
-        "token_present": bool(TOKEN),
-        "time": time.time()
-    })
-
-# ─── Lazy imports ──────────────────────────────────────────────────────
-def load_bias_engine():
-    try:
-        from src.analytics.bias_engine import calculate_bias_for_asset, run_bias_engine
-        from src.ingestion.market_prices import ASSETS, FOREX_PAIRS, fetch_live_price
-        return calculate_bias_for_asset, run_bias_engine, ASSETS, FOREX_PAIRS, fetch_live_price
-    except Exception as e:
-        logger.error(f"❌ Import error: {e}", exc_info=True)
-        return None, None, None, None, None
-
-calc, run, ASSETS, FOREX, fetch_live = load_bias_engine()
-if calc is None:
-    logger.error("❌ Bias engine not loaded! Bot will not work.")
+    return jsonify({"status": "running", "token_set": bool(TOKEN), "time": time.time()})
 
 # ─── Handlers ────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🏛️ **MACRO BIAS ENGINE**\n\n"
-        "Send /eurusd or just type EURUSD\n"
-        "Data source: Yahoo Finance (adjusted close)",
-        parse_mode="Markdown"
-    )
-    logger.info(f"📱 /start from {update.effective_user.username}")
+    await update.message.reply_text("🏛️ Macro Bias Engine. Send /eurusd or just type EURUSD.")
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🏓 Pong! Bot is alive.")
-    logger.info("📱 /ping")
 
 async def asset_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text
     ticker = raw.replace("/", "").strip().upper()
-    logger.info(f"📩 Received: '{raw}' → '{ticker}'")
-
-    if calc is None or ASSETS is None:
-        await update.message.reply_text("❌ Bias engine not loaded.")
-        return
+    logger.info(f"📩 Received: {raw} → {ticker}")
 
     if ticker not in ASSETS:
         if raw.startswith("/"):
@@ -97,34 +73,25 @@ async def asset_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_chat_action("typing")
     try:
-        metrics = calc(ticker)
+        metrics = calculate_bias_for_asset(ticker)
         if metrics.get("status") != "SUCCESS":
             await update.message.reply_text(f"⚠️ {metrics.get('message')}")
             return
 
-        # ─── Fetch Live Price ──────────────────────────────────────────
-        live_price = None
-        live_source = "❌ Unavailable"
-        if fetch_live:
-            tickers = ASSETS.get(ticker, [])
-            if tickers:
-                live_price = fetch_live(tickers)
-                if live_price:
-                    live_source = "Yahoo 1m (intraday)"
-
-        # ─── Formatting ────────────────────────────────────────────────
-        is_fx = ticker in FOREX if FOREX else False
+        is_fx = ticker in FOREX_PAIRS if FOREX_PAIRS else False
         close_str = f"{metrics['latest_close']:.4f}" if is_fx else f"${metrics['latest_close']:,.2f}"
         sma_str = f"{metrics['sma_20']:.4f}" if is_fx else f"${metrics['sma_20']:,.2f}"
-        live_str = f"{live_price:.4f}" if live_price and is_fx else f"${live_price:,.2f}" if live_price else "❌ Unavailable"
         dir_emoji = "🟢" if metrics["direction"] == "BULLISH" else "🔴" if metrics["direction"] == "BEARISH" else "⚪"
+
+        # Fetch live price
+        tickers = ASSETS.get(ticker, [])
+        live = fetch_live_price(tickers)
+        live_str = f"{live:.4f}" if live and is_fx else f"${live:,.2f}" if live else "❌ Unavailable"
 
         reply = (
             f"📊 **MACRO PROFILE: {ticker}**\n"
-            f"📅 As of: {metrics.get('last_update', 'N/A')}\n"
-            f"📡 Source: Yahoo Finance (adjusted close)\n\n"
-            f"💰 **Live Price:** `{live_str}`\n"
-            f"   _({live_source})_\n"
+            f"📅 As of: {metrics.get('last_update', 'N/A')}\n\n"
+            f"💰 **Live:** `{live_str}`\n"
             f"💵 **Close:** `{close_str}`\n"
             f"📉 **20‑Day SMA:** `{sma_str}`\n"
             f"🎚️ **Z‑Score:** `{metrics['z_score']:+.2f}`\n"
@@ -136,29 +103,14 @@ async def asset_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply, parse_mode="Markdown")
         logger.info(f"✅ Sent report for {ticker}")
     except Exception as e:
-        logger.error(f"❌ Error in handler: {e}", exc_info=True)
+        logger.error(f"❌ Handler error: {e}", exc_info=True)
         await update.message.reply_text("❌ Internal error. Check logs.")
 
 async def matrix(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Generating matrix...")
-    if run is None:
-        await update.message.reply_text("❌ Engine not loaded.")
-        return
-    try:
-        results = run()
-        report = "🏛️ **MACRO BIAS MATRIX**\n\n"
-        for t, d in results.items():
-            if d.get("status") == "SUCCESS":
-                emoji = "🟢" if d["direction"] == "BULLISH" else "🔴" if d["direction"] == "BEARISH" else "⚪"
-                report += f"{emoji} {t}: {d['direction']} ({d['probability']:.0f}%)\n"
-            else:
-                report += f"⚪ {t}: {d.get('message', 'No data')}\n"
-        await update.message.reply_text(report, parse_mode="Markdown")
-        logger.info("✅ Sent matrix")
-    except Exception as e:
-        logger.error(f"❌ Matrix error: {e}", exc_info=True)
+    # ... (optional, can be added later)
+    await update.message.reply_text("Matrix command coming soon.")
 
-# ─── Flask runner (background thread) ────────────────────────────────
+# ─── Flask runner (background) ────────────────────────────────────────
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     logger.info(f"🚀 Flask starting on port {port}")
@@ -166,24 +118,27 @@ def run_flask():
 
 # ─── Bot runner (main thread) ──────────────────────────────────────────
 def run_bot():
-    logger.info("🚀 Starting Telegram bot in main thread...")
+    logger.info("🤖 Starting Telegram bot in main thread...")
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", start))
     app.add_handler(CommandHandler("ping", ping_cmd))
     app.add_handler(CommandHandler("bias", matrix))
-    if ASSETS:
-        for a in ASSETS.keys():
-            app.add_handler(CommandHandler(a.lower(), asset_handler))
+    # Register all asset commands
+    for asset in ASSETS:
+        app.add_handler(CommandHandler(asset.lower(), asset_handler))
+    # Catch-all for text
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, asset_handler))
+    # Catch-all for unknown commands
     app.add_handler(MessageHandler(filters.COMMAND, asset_handler))
 
-    logger.info("🤖 Bot starting polling (main thread)...")
+    logger.info("🤖 Starting polling (main thread)...")
     app.run_polling()
 
-# ─── Main Entry ──────────────────────────────────────────────────────────
+# ─── Main ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # Flask in background
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("🔄 Flask thread started")
+    # Bot in main thread (blocking)
     run_bot()
