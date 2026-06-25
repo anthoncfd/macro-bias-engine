@@ -1,7 +1,7 @@
 """
-MACRO BIAS ENGINE - Main Ingestion Pipeline (V2.2 - Fully Automated)
+MACRO BIAS ENGINE - Main Ingestion Pipeline (V2.3 - Error Proof Type Checking)
 Uses direct Yahoo API for historical assets and TradingView for metals backfilling.
-Automatically calculates required calendar windows to completely eliminate manual inputs.
+Automatically calculates required calendar windows and normalizes varying price payload types.
 """
 import sys
 import os
@@ -16,14 +16,13 @@ from src.database.supabase_client import get_supabase_client
 from src.ingestion.market_prices import fetch_all_prices, FOREX_PAIRS, ASSETS
 
 # Global Target Metrics
-TARGET_MARKET_HISTORY = 60  # We want a target buffer of 60 trading sessions
+TARGET_MARKET_HISTORY = 60  
 SMA_WINDOW = 20
-MIN_REQUIRED_SESSIONS = 25  # Minimum safe count to run a true 20 SMA with Z-Score
+MIN_REQUIRED_SESSIONS = 25  
 
 def calculate_required_calendar_days(target_trading_days):
     """
     Dynamically scales trading days to calendar days to absorb weekend market closures.
-    Formula accounts for 2 weekend days out of every 5 business days, adding a 5-day safety margin.
     """
     weeks = (target_trading_days // 5) + 1
     weekend_days = weeks * 2
@@ -99,7 +98,6 @@ def fetch_historical_metal_spot(symbol="XAUUSD", exchange="OANDA", count=40):
 
 def run_backfill(required_trading_days):
     """Backfills history by automatically calculating the necessary calendar offset."""
-    # Convert required trading sessions into safe physical calendar days
     calendar_days_back = calculate_required_calendar_days(required_trading_days)
     
     print(f"\n📥 AUTOMATED BACKFILL: Requesting {calendar_days_back} calendar days to capture {required_trading_days} trading sessions...")
@@ -111,13 +109,11 @@ def run_backfill(required_trading_days):
     for display_name, tickers in ASSETS.items():
         print(f"\n📊 Processing {display_name}...")
 
-        # Metals Path
         if display_name in ["XAUUSD", "XAGUSD"]:
             df = fetch_historical_metal_spot(display_name, exchange="OANDA", count=required_trading_days + 10)
             if df is None or df.empty:
                 print(f"   ⚠️ No historical spot data extracted for {display_name}.")
                 continue
-        # Standard Assets Path
         else:
             df = None
             for ticker in tickers:
@@ -129,7 +125,6 @@ def run_backfill(required_trading_days):
                 print(f"   ❌ No data for {display_name}")
                 continue
 
-        # Ingestion Sync Loop
         for _, row in df.iterrows():
             date_str = row["date"]
             price = float(row["close"])
@@ -173,7 +168,6 @@ def get_database_state():
                 .select("created_at", count="exact") \
                 .eq("ticker", display_name) \
                 .execute()
-            # Handle standard postgrest count parsing seamlessly
             count = result.count if hasattr(result, 'count') else len(result.data or [])
             state[display_name] = count
         return state
@@ -194,7 +188,6 @@ def run_pipeline():
     print(f"   📊 Current asset history depths: {db_state}")
     print(f"   📉 Minimum available history across assets: {lowest_session_count} trading days.")
 
-    # AUTOMATED TRIGGER: If history falls short of the required window, automatically top it off
     if lowest_session_count < MIN_REQUIRED_SESSIONS:
         sessions_needed = TARGET_MARKET_HISTORY - lowest_session_count
         print(f"\n⚠️ Database needs history. Automatically requesting a {sessions_needed}-session fill...")
@@ -206,10 +199,33 @@ def run_pipeline():
     time.sleep(3)
 
     print("\n📊 Fetching live market data...")
-    prices = fetch_all_prices()
+    raw_prices = fetch_all_prices()
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Type Normalizer Processing Layer
+    normalized_prices = {}
+    for name in ASSETS.keys():
+        item = raw_prices.get(name)
+        
+        if item is None:
+            normalized_prices[name] = None
+        elif isinstance(item, dict):
+            # Already matches standard data shape dictionary payload
+            normalized_prices[name] = {
+                "price": item.get("price"),
+                "date": item.get("date", today_str)
+            }
+        elif isinstance(item, (int, float)):
+            # Normalize naked numbers cleanly to unified formats
+            normalized_prices[name] = {
+                "price": float(item),
+                "date": today_str
+            }
+        else:
+            normalized_prices[name] = None
 
     print("\n📊 Market Snapshot:")
-    for name, item in prices.items():
+    for name, item in normalized_prices.items():
         if item is None or item.get("price") is None:
             print(f"   ❌ {name:10} : No data")
         else:
@@ -229,26 +245,30 @@ def run_pipeline():
 
     print("\n📤 Syncing today's closes...")
     inserted_count = 0
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    for name, item in prices.items():
+    for name, item in normalized_prices.items():
         if item is None or item.get("price") is None:
             continue
+            
         price_val = item["price"]
+        log_date = item["date"]
+        
         dup_check = supabase.table("market_structure_logs") \
             .select("id") \
             .eq("ticker", name) \
-            .eq("created_at", today_str) \
+            .eq("created_at", log_date) \
             .execute()
+            
         if dup_check.data:
-            print(f"   ⚪ {name} already recorded for today.")
+            print(f"   ⚪ {name} already recorded for date ({log_date}).")
             continue
+            
         row = {
             "ticker": name,
             "latest_close": float(price_val),
             "trend": "NEUTRAL",
             "momentum_score": 0.0,
-            "created_at": today_str
+            "created_at": log_date
         }
         try:
             supabase.table("market_structure_logs").insert(row).execute()
