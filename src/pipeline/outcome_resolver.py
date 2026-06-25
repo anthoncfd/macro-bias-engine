@@ -1,10 +1,10 @@
 """
 MACRO BIAS ENGINE - Outcome Resolution Layer
-Evaluates historical predictions against realization vectors 
+Evaluates historical predictions against realization vectors
 after a standard 20-trading-day maturation cycle.
 """
 import logging
-import pandas as pd
+import sys
 from datetime import datetime, timedelta
 from src.database.supabase_client import get_supabase_client
 
@@ -23,10 +23,11 @@ def run_outcome_resolution():
     cutoff_date = (datetime.utcnow() - timedelta(days=28)).isoformat()
     
     try:
+        # Query using the correct columns: is_resolved, created_date_key
         unresolved_res = supabase.table("predictions") \
             .select("*") \
-            .eq("resolved", False) \
-            .lt("created_at", cutoff_date) \
+            .eq("is_resolved", False) \
+            .lt("created_date_key", cutoff_date) \
             .execute()
             
         unresolved_records = unresolved_res.data
@@ -39,13 +40,14 @@ def run_outcome_resolution():
         for pred in unresolved_records:
             pred_id = pred["id"]
             ticker = pred["ticker"]
-            entry_price = float(pred["price"])
-            direction = pred["direction"]
+            entry_price = float(pred["latest_close"])   # column name is latest_close
+            direction = pred["trend"]                   # column name is trend
             
-            # 2. Fetch the exit realization price close 
-            # Looking for the closest logged close historical price row roughly 28 calendar days later
-            pred_time = datetime.fromisoformat(pred["created_at"].replace("Z", "+00:00"))
-            target_exit_date = (pred_time + timedelta(days=28)).strftime("%Y-%m-%d")
+            # 2. Fetch the exit realization price close
+            # pred_time = datetime.fromisoformat(pred["created_at"].replace("Z", "+00:00"))
+            # Use created_date_key as the prediction date
+            pred_date = datetime.fromisoformat(pred["created_date_key"])
+            target_exit_date = (pred_date + timedelta(days=28)).strftime("%Y-%m-%d")
             
             exit_res = supabase.table("market_structure_logs") \
                 .select("latest_close, created_at") \
@@ -57,6 +59,7 @@ def run_outcome_resolution():
                 
             if not exit_res.data:
                 # Target price historical baseline row has not been ingested yet
+                logger.info(f"   ⏳ No exit price for {ticker} after {target_exit_date} — waiting.")
                 continue
                 
             exit_data = exit_res.data[0]
@@ -75,7 +78,7 @@ def run_outcome_resolution():
             # 4. Record details directly into your tracking repository
             result_row = {
                 "prediction_id": pred_id,
-                "entry_date": pred["created_at"],
+                "entry_date": pred["created_date_key"],
                 "exit_date": exit_date,
                 "return_pct": float(return_pct),
                 "correct": bool(correct)
@@ -85,7 +88,7 @@ def run_outcome_resolution():
             supabase.table("prediction_results").insert(result_row).execute()
             
             # Mark parent row flag as resolved to keep processing loops light
-            supabase.table("predictions").update({"resolved": True}).eq("id", pred_id).execute()
+            supabase.table("predictions").update({"is_resolved": True}).eq("id", pred_id).execute()
             
             logger.info(f"   [RESOLVED] ID: {pred_id} | {ticker} | Return: {return_pct:+.2f}% | Hit: {correct}")
             
